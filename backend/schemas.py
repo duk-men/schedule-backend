@@ -103,6 +103,10 @@ class Weights(BaseModel):
     weekendExtraSun: float = 3
     weekendExtraSat: float = 2
     weekendExtraFri: float = 1
+    # 개인 상한을 다 못 채운 채 남는 여력에 대한 페널티 (0.5일 단위). 형평만으로는
+    # 상한까지 채우도록 밀어주지 않아서 따로 둔다. over(과잉 인원) 페널티보다 충분히
+    # 세게 잡아야, 이미 커버된 시간대에 여유 인력을 더 넣는 걸 주저하지 않는다.
+    underWeek: float = 250
 
 
 class SolveRequest(BaseModel):
@@ -145,6 +149,7 @@ class Penalties(BaseModel):
     overtime: float
     peakFloor: float = 0        # 금토일 12~17시 전용 추가 페널티 (peakFloorShort + peakFloorPref3)
     weekendExtra: float = 0     # 일>토>금 여유 인력 보상 (음수일수록 그 방향으로 잘 쏠린 것)
+    underWeek: float = 0        # 개인 상한을 다 못 채운 채 남는 여력 페널티
 
 
 class Diagnostics(BaseModel):

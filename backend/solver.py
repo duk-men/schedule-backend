@@ -687,6 +687,19 @@ def solve(req: SolveRequest) -> SolveResponse:
     else:
         rng = 0
 
+    # ---------- 13.5 남는 여력 최대한 활용 ----------
+    # 인력이 빠듯한 상황에서 누군가 개인 상한을 다 못 채운 채 남고 다른 사람은
+    # 초과근무까지 쓰는 건 비효율적이다. 형평(13절)은 사람들 사이 편차만 줄일 뿐
+    # 상한까지 채우도록 밀어주진 않으므로, 남는 여력을 상한까지 채우도록 소프트로
+    # 유도한다. 지원 인력(타 매장)은 이 매장 상한을 채울 이유가 없어 제외한다.
+    under_week = {}
+    for ei in home_ids:
+        e = EMP[ei]
+        cap_units = 2 * min(e["maxw"], req.rules.weekCap)
+        uv = m.NewIntVar(0, cap_units, f"under{ei}")
+        m.Add(uv >= cap_units - load[ei])
+        under_week[ei] = uv
+
     # ---------- 14. 초과근무 ----------
     overtime_units = {}
     BIG = 1000  # 문제 규모가 작아 타이트한 도메인이 필요 없다. 넉넉히 잡아 domain 충돌을 피한다.
@@ -725,6 +738,7 @@ def solve(req: SolveRequest) -> SolveResponse:
     obj.append(int(round(w.fairness)) * rng)
     obj += [int(round(w.minWeek)) * s for s in minw_short.values()]
     obj += [int(round(w.overtime)) * ov for ov in overtime_units.values()]
+    obj += [int(round(w.underWeek)) * u for u in under_week.values()]
     obj += [-int(round(wt)) * v for v, wt in weekend_extra_terms]
     m.Minimize(sum(obj))
 
@@ -830,6 +844,7 @@ def solve(req: SolveRequest) -> SolveResponse:
             + sum(int(round(w.peakFloorPref3 * BUCKET)) * _val(solver, s) for s in peak_floor_pref3)
         ),
         weekendExtra=sum(-int(round(wt)) * _val(solver, v) for v, wt in weekend_extra_terms),
+        underWeek=sum(int(round(w.underWeek)) * _val(solver, u) for u in under_week.values()),
     )
 
     diagnostics = Diagnostics(perDay=per_day, perEmployee=per_emp, penalties=penalties)

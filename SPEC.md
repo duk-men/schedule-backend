@@ -149,7 +149,7 @@ server: { proxy: { "/api": "http://localhost:8000" } }
     "fairness": 100, "minWeek": 500, "overtime": 180,
     "weekendExtraSun": 150, "weekendExtraSat": 100, "weekendExtraFri": 50,
     "underWeek": 250,
-    "requireFillShort": 20000, "hardFloorShort": 8000
+    "requireFillShort": 20000, "hardFloorShort": 8000, "peakIntegralShort": 5000
   },
 
   "existing": {                          // 읽기 전용 문맥. 배정 대상 아님
@@ -255,6 +255,7 @@ def solve(req: SolveRequest) -> SolveResponse: ...
 | 마감-오픈-마감 | 캘린더 인접일이 아니라 그 직원이 실제로 근무한 바로 전/다음 날 기준으로 검사 (쉬는 날 스킵) |
 | 바 인원 최소 보장 | 금토일 12~17시 최소 3명, 11~21시 나머지 최소 2명 / 평일 12~21시 최소 2명. 소프트 floor(11~17, 요일 무관, 12절)보다 훨씬 무거운 페널티(`hardFloorShort`)로 별도로 건다 — 채울 수 있으면 사실상 하드, 인력이 정말 모자라면 그 시간대만 미달로 남기고 warnings에 남김 |
 | 필수 자리·바 인원 완화 | `requireFillShort`/`hardFloorShort`로 다른 모든 항을 압도하는 무거운 페널티를 줘서, 인력 부족으로 도저히 못 채우는 경우에도 INFEASIBLE 대신 최선의 부분 배정 + 어디가 비었는지 warnings로 반환 |
+| 금토일 vs 평일 적분값 | 가장 적게 채워진 금토일의 11~21시 총 커버리지가 가장 많이 채워진 평일의 그것보다 작으면 안 된다는 요청. `peakIntegralShort`로 완화 페널티(위 둘보다는 약하게) |
 | 일>토>금 여유 배치 | 월~목보다 일/토/금에 여유 인력을 더 배치하도록 `weekendExtraSun/Sat/Fri`로 목적함수에 보상을 더함 (소프트). over 페널티의 요일별 차이를 이길 만큼 세야 실제로 방향이 튼다 |
 | 개인 상한 최대 활용 | 형평(13절)은 편차만 줄일 뿐 상한까지 채우진 않아서, `underWeek`로 남는 여력에 페널티를 매겨 상한까지 쓰도록 유도 (소프트, 홈 매장 직원만) |
 

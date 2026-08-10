@@ -705,6 +705,32 @@ def solve(req: SolveRequest) -> SolveResponse:
                 m.Add(short >= need_here - fe)
             hard_floor_shortfall.append((short, d_str, t, need_here))
 
+    # ---------- 12.6 금토일이 평일보다 항상 더 채워지도록 ----------
+    # 가장 적게 채워진 금토일의 11~21시 총 커버리지("적분값")도, 가장 많이 채워진
+    # 평일의 그것보다 작으면 안 된다는 요청. 인력 부족·다른 규칙(13.5절 남는 여력
+    # 최대활용 등)과 부딪히면 하드로는 쉽게 INFEASIBLE이 되므로, 다른 항을 압도하는
+    # 무거운 페널티를 가진 소프트 제약으로 둔다.
+    cap_hi_day = E * (tb(21) - tb(11))
+    day_integral = {}
+    for di, d_str in enumerate(dates):
+        bread = bd.peak if is_peak(d_str) else bd.weekday
+        total = sum(floor_expr(di, t, bread) for t in range(tb(11), tb(21)))
+        iv = m.NewIntVar(0, cap_hi_day, f"dayint_{di}")
+        m.Add(iv == total)
+        day_integral[di] = iv
+
+    weekday_ids = [di for di, d in enumerate(dates) if not is_peak(d)]
+    peak_ids = [di for di, d in enumerate(dates) if is_peak(d)]
+    peak_vs_weekday_shortfall = []
+    if weekday_ids and peak_ids:
+        wmax = m.NewIntVar(0, cap_hi_day, "wkdayIntMax")
+        pmin = m.NewIntVar(0, cap_hi_day, "peakIntMin")
+        m.AddMaxEquality(wmax, [day_integral[di] for di in weekday_ids])
+        m.AddMinEquality(pmin, [day_integral[di] for di in peak_ids])
+        short = m.NewIntVar(0, cap_hi_day, "peakIntShort")
+        m.Add(short >= wmax - pmin)
+        peak_vs_weekday_shortfall.append(short)
+
     # ---------- 13. 형평 (max-min) ----------
     home_ids = [ei for ei, e in enumerate(EMP) if e["storeId"] == req.storeId]
     if home_ids:
@@ -764,6 +790,7 @@ def solve(req: SolveRequest) -> SolveResponse:
     obj = []
     obj += [int(round(w.requireFillShort)) * s for s, _, _, _ in fill_shortfall]
     obj += [int(round(w.hardFloorShort)) * s for s, _, _, _ in hard_floor_shortfall]
+    obj += [int(round(w.peakIntegralShort)) * s for s in peak_vs_weekday_shortfall]
     obj += [int(round(wt * BUCKET)) * g for g, wt in gap_terms]
     obj += [int(round(w.gapDay)) * b for b in day_has_gap]
     obj += [int(round(w.floor * BUCKET)) * s for s in floor_short]
@@ -810,6 +837,13 @@ def solve(req: SolveRequest) -> SolveResponse:
         if val > 0:
             warnings.append(
                 f"{d_str} {blabel(t)}: 바 인원 최소 {need_here}명 중 {val}명을 못 채웠습니다 (인력 부족)."
+            )
+    for short in peak_vs_weekday_shortfall:
+        val = _val(solver, short)
+        if val > 0:
+            warnings.append(
+                f"가장 적게 채워진 금토일이 가장 많이 채워진 평일보다 11~21시 커버리지가 "
+                f"{val}만큼 부족합니다."
             )
 
     # ---------- 결과 추출 ----------
@@ -889,6 +923,7 @@ def solve(req: SolveRequest) -> SolveResponse:
         underWeek=sum(int(round(w.underWeek)) * _val(solver, u) for u in under_week.values()),
         requireFillShort=sum(int(round(w.requireFillShort)) * _val(solver, s) for s, _, _, _ in fill_shortfall),
         hardFloorShort=sum(int(round(w.hardFloorShort)) * _val(solver, s) for s, _, _, _ in hard_floor_shortfall),
+        peakIntegralShort=sum(int(round(w.peakIntegralShort)) * _val(solver, s) for s in peak_vs_weekday_shortfall),
     )
 
     diagnostics = Diagnostics(perDay=per_day, perEmployee=per_emp, penalties=penalties)

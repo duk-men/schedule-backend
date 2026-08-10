@@ -39,7 +39,7 @@ const SHIFTS = [
   { key: "jjinO", label: "찐오", from: tb(8), to: tb(18), need: 1, extra: 0, open: true, color: "#2F6F5E" },
   { key: "earlyShort", label: "이른오전", from: tb(8), to: tb(15), need: 0, extra: 1, open: true, color: "#4A7C6F" },
   { key: "jjapO", label: "짭오", from: tb(9), to: tb(19), need: 0, peak: 1, extra: 1, open: true, color: "#3D5A98" },
-  { key: "close", label: "마감", from: tb(12), to: tb(22), need: 1, peak: 2, extra: 0, late: true, color: "#B4472C" },
+  { key: "close", label: "마감", from: tb(12), to: tb(22), need: 1, peak: 1, extra: 0, late: true, color: "#B4472C" },
   { key: "thirteen", label: "13", from: tb(13), to: tb(23), need: 1, extra: 0, late: true, color: "#6B4A7A" },
   { key: "middle", label: "미들", from: tb(10), to: tb(20), need: 0, extra: 1, open: true, color: "#8A6A2F" },
   { key: "night", label: "야간", from: tb(22), to: tb(32), need: 1, extra: 0, night: true, color: "#16202B" },
@@ -74,7 +74,9 @@ const WEEK_CAP = 6; // 어떤 경우에도 주 6일을 넘길 수 없다
 // 2500회부터는 6번 다 똑같이 가장 좋은 결과를 찾았다). 그래서 2500으로 둔다.
 const AUTO_TRIES = 2500;
 const AUTO_CHUNK = 10; // 한 틱에 처리할 시도 수. 이 단위로 쪼개서 화면이 안 멈추게 한다
-const FILL_ORDER = ["jjinO", "jjapO", "close", "thirteen", "earlyShort", "middle"];
+// 13(마감보다 1시간 늦게 끝남)을 마감보다 먼저 채운다. 한 명만 남는 날,
+// 마감이 이기면 22~23시가 비지만 13이 이기면 그 시간까지 커버되기 때문.
+const FILL_ORDER = ["jjinO", "jjapO", "thirteen", "close", "earlyShort", "middle"];
 
 /* ------------------------------------------------------------------
    날짜 유틸
@@ -724,6 +726,7 @@ export default function ScheduleDemo() {
   const [autoMap, setAutoMap] = useState({});
   const [autoBusy, setAutoBusy] = useState(false);
   const [autoProgress, setAutoProgress] = useState(0);
+  const [copyStatus, setCopyStatus] = useState("idle"); // idle | copied | error
   const [selected, setSelected] = useState(null);
   const [picker, setPicker] = useState(null);
   const [tab, setTab] = useState("board");
@@ -996,6 +999,15 @@ export default function ScheduleDemo() {
     [scopeDates, gapMinOf, hasSchedule]
   );
   const peakShortDays = useMemo(() => shortDays.filter(isPeak), [shortDays]);
+  // 이 범위의 첫날 새벽(00~08시)은 그 전날 밤 근무자가 있어야 채워지는데,
+  // 그 전날이 아직 하나도 배정 안 되어 있으면 항상 부족으로 잡힌다.
+  // 이번 주만 놓고 보면 원인을 알 수 없어 헷갈리기 쉬워 따로 짚어준다.
+  const firstDayBoundaryGap = useMemo(() => {
+    if (!hasSchedule || scopeDates.length === 0) return false;
+    const first = scopeDates[0];
+    const prevEmpty = Object.keys(dayOf(shiftDate(first, -1))).length === 0;
+    return prevEmpty && gapMinOf(first) > 0;
+  }, [hasSchedule, scopeDates, dayOf, gapMinOf]);
   // 잠긴 날짜는 자동 배정이 손대지 않고 그대로 둔다. 수동으로 편집했던 날이
   // 계속 남아 아무리 다시 돌려도 그 자리가 안 채워지는 걸 놓치기 쉬워 따로 알려준다.
   const weekLockedDays = useMemo(() => weekDates.filter((d) => locked[d]), [weekDates, locked]);
@@ -1007,6 +1019,64 @@ export default function ScheduleDemo() {
     () => Math.round(scopeDates.reduce((a, d) => a + gapMinOf(d), 0) / 60),
     [scopeDates, gapMinOf]
   );
+
+  // 이번 주 결과를 마크다운 표로 만들어 클립보드에 복사한다 (피드백 요청용)
+  async function copyResultMarkdown() {
+    const lines = [];
+    lines.push(
+      `## ${storeName(storeId)} ${weekStart.slice(5).replace("-", "/")}–${shiftDate(weekStart, 6)
+        .slice(5)
+        .replace("-", "/")}`
+    );
+    lines.push("");
+    if (peakShortDays.length > 0) lines.push(`- ⚠️ 금토일 ${peakShortDays.length}일이 비었습니다.`);
+    if (floorRiskDays.length > 0)
+      lines.push(`- ⚠️ ${floorRiskDays.length}일은 휴게·빵 시간대에 바 인원이 ${FLOOR_MIN}명 미만입니다.`);
+    if (shortDays.length > 0)
+      lines.push(`- ⚠️ 이번 주 ${shortDays.length}일에 빈 자리, 합쳐서 ${totalShortHours}시간 부족.`);
+    if (weekLockedDays.length > 0)
+      lines.push(`- 🔒 잠긴 날짜: ${weekLockedDays.map((d) => Number(d.slice(8))).join(", ")}일`);
+    if (firstDayBoundaryGap)
+      lines.push(
+        `- ℹ️ ${Number(scopeDates[0]?.slice(8))}일 새벽 부족은 전날(전주) 야간 미배정 때문일 수 있음.`
+      );
+    lines.push("");
+
+    const header = ["직원", ...weekDates.map((d) => `${WD[wdIndex(parse(d))]}${Number(d.slice(8))}`)];
+    lines.push(`| ${header.join(" | ")} |`);
+    lines.push(`|${header.map(() => "---").join("|")}|`);
+    weekRows.forEach((e) => {
+      const guest = e.storeId !== storeId;
+      const name = guest ? `${e.name}(지원)` : e.name;
+      const cells = weekDates.map((d) => {
+        const key = slotOfEmp(e.id, d);
+        if (key) return slotInfo(key).short;
+        if (e.vacations.includes(d)) return "휴";
+        if (e.until && d > e.until) return "-";
+        return "·";
+      });
+      lines.push(`| ${name} | ${cells.join(" | ")} |`);
+    });
+    lines.push("");
+    lines.push("### 이번 주 근무일수 (쩜오 0.5)");
+    lines.push("| 직원 | 근무일수 | 상한 |");
+    lines.push("|---|---|---|");
+    weekRows.forEach((e) => {
+      const guest = e.storeId !== storeId;
+      const n = weekDaysOf(e.id);
+      const cap = Math.min(e.maxPerWeek, WEEK_CAP);
+      lines.push(`| ${guest ? `${e.name}(지원)` : e.name} | ${n} | ${guest ? "-" : cap} |`);
+    });
+
+    const md = lines.join("\n");
+    try {
+      await navigator.clipboard.writeText(md);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("error");
+    }
+    setTimeout(() => setCopyStatus("idle"), 2000);
+  }
 
   const stats = useMemo(() => {
     const s = {};
@@ -1178,6 +1248,7 @@ export default function ScheduleDemo() {
                     .filter((i) => i < values.length)
                     .map((i) => {
                       const v = Math.max(0, values[i]);
+                      const barColor = colorAt(values[i], i);
                       return (
                         <div key={i} className="relative flex h-full flex-1 items-end justify-center">
                           <span
@@ -1185,7 +1256,7 @@ export default function ScheduleDemo() {
                             style={{
                               bottom: `calc(${(v / top) * 100}% + 2px)`,
                               fontSize: 9,
-                              color: INK,
+                              color: barColor === ALERT ? ALERT : INK,
                             }}
                           >
                             {v}
@@ -1194,7 +1265,7 @@ export default function ScheduleDemo() {
                             style={{
                               width: "80%",
                               height: `${(v / top) * 100}%`,
-                              background: colorAt(values[i], i),
+                              background: barColor,
                               borderRadius: 2,
                             }}
                           />
@@ -1435,6 +1506,20 @@ export default function ScheduleDemo() {
             )}
           </div>
 
+          {view === "week" && hasSchedule && (
+            <button
+              onClick={copyResultMarkdown}
+              className="mt-2 w-full rounded-md py-2 text-xs font-medium active:opacity-70"
+              style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
+            >
+              {copyStatus === "copied"
+                ? "복사됨 ✓ — 붙여넣기 해서 공유하세요"
+                : copyStatus === "error"
+                ? "복사 실패 — 브라우저 권한을 확인해 주세요"
+                : "📋 이번 주 결과 마크다운으로 복사"}
+            </button>
+          )}
+
           {peakShortDays.length > 0 && (
             <div
               className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
@@ -1471,6 +1556,17 @@ export default function ScheduleDemo() {
               🔒 {weekLockedDays.map((d) => Number(d.slice(8))).join(", ")}일은 잠겨 있어 "이번 주
               자동으로 짜기"를 눌러도 그대로 유지됩니다. 빈 자리가 안 없어진다면 이 날짜를 먼저
               풀어보세요.
+            </div>
+          )}
+
+          {firstDayBoundaryGap && (
+            <div
+              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+              style={{ background: "#EAE8E1", color: MUTED }}
+            >
+              {Number(scopeDates[0].slice(8))}일 새벽(00~08시) 부족은 그 전날 밤 근무자가 아직
+              배정 안 되어서 생기는 것으로 보입니다. 이 범위만 다시 돌려서는 안 없어지고, 그 전날(전주)을
+              먼저 배정해야 사라집니다.
             </div>
           )}
 

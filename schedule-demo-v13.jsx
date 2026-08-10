@@ -68,7 +68,11 @@ function startTaken(day, slot) {
 }
 
 const WEEK_CAP = 6; // 어떤 경우에도 주 6일을 넘길 수 없다
-const AUTO_TRIES = 300; // 자동 배정 시 여러 시드로 시도해 보고 가장 점수 낮은 걸 고른다
+// 자동 배정 시 여러 시드로 시도해 보고 가장 점수 낮은 걸 고른다.
+// 1000회는 시작점(무작위 시드 기준점)에 따라 가끔 더 나쁜 결과에 걸렸다
+// (같은 조건을 6번 반복 실행했을 때 1000회는 종종 나쁜 지역해에 빠졌지만,
+// 2500회부터는 6번 다 똑같이 가장 좋은 결과를 찾았다). 그래서 2500으로 둔다.
+const AUTO_TRIES = 2500;
 const AUTO_CHUNK = 10; // 한 틱에 처리할 시도 수. 이 단위로 쪼개서 화면이 안 멈추게 한다
 const FILL_ORDER = ["jjinO", "jjapO", "close", "thirteen", "earlyShort", "middle"];
 const EXTRA_ORDER = ["jjapO", "earlyShort", "middle"];
@@ -398,6 +402,17 @@ function autoAssignAll({
           useSet(date).add(id);
         })
       );
+    });
+  });
+
+  // dates 범위가 한 주뿐이어도(주간 배정) 마감-오픈 연속 근무 판정이 무너지지
+  // 않도록, 그 범위 바로 앞뒤 하루씩은 실제 기존 배정을 읽기 전용으로 심어둔다.
+  // weekCount 등 집계에는 넣지 않는다 — 이 두 날짜는 이번 배정 대상이 아니다.
+  STORES.forEach((s) => {
+    const before = shiftDate(dates[0], -1);
+    const after = shiftDate(dates[dates.length - 1], 1);
+    [before, after].forEach((d) => {
+      if (!board[s.id][d]) board[s.id][d] = (prevBoard[s.id] || {})[d] || {};
     });
   });
 
@@ -787,19 +802,26 @@ export default function ScheduleDemo() {
   }
 
   async function runAuto() {
-    // 시드를 바꿔가며 아주 여러 번 짠 뒤 가장 점수가 낮은 것을 고른다.
-    // 시도 수가 많아 시간이 좀 걸리므로 로딩 문구를 먼저 그린 뒤 청크 단위로 나눠 돈다.
+    // 현재 선택된 매장 + 현재 보고 있는 주만 짠다. 시드를 바꿔가며 아주 여러 번
+    // 짠 뒤 가장 점수가 낮은 것을 고른다. 시도 수가 많아 시간이 좀 걸리므로
+    // 로딩 문구를 먼저 그린 뒤 청크 단위로 나눠 돈다.
     setAutoBusy(true);
     setAutoProgress(0);
     await new Promise((r) => setTimeout(r, 0));
 
+    // 이 매장 직원 + 다른 매장의 야간 직원(지원 백업용)까지 포함한다.
+    // 신중동처럼 야간 인력이 1명뿐이면 혼자서는 주 7일을 못 채우므로,
+    // 예전 "전 매장 동시 배정" 때 있던 야간 지원을 여기서도 살려둔다.
+    const targetEmployees = employees.filter(
+      (e) => e.storeId === storeId || e.kind === "night"
+    );
     let next = null;
     let best = Infinity;
     const base = Math.floor(Math.random() * 100000);
     for (let i = 0; i < AUTO_TRIES; i++) {
       const cand = autoAssignAll({
-        dates: gridDates,
-        employees,
+        dates: weekDates,
+        employees: targetEmployees,
         prevBoard: board,
         lockMap,
         shortage,
@@ -807,7 +829,7 @@ export default function ScheduleDemo() {
         breadPeak,
         seed: base + i,
       });
-      const sc = scoreBoard(cand, gridDates, employees, breadWeekday, breadPeak);
+      const sc = scoreBoard(cand, weekDates, targetEmployees, breadWeekday, breadPeak);
       if (sc < best) {
         best = sc;
         next = cand;
@@ -818,15 +840,35 @@ export default function ScheduleDemo() {
       }
     }
 
-    setBoard(next);
-    const marks = {};
-    STORES.forEach((s) => {
-      marks[s.id] = {};
-      gridDates.forEach((d) => {
-        if (!(lockMap[s.id] || {})[d]) marks[s.id][d] = true;
+    // 이 매장·이 주 날짜만 갈아끼운다. 다른 매장이나 다른 주에 이미 짜둔
+    // 스케줄은 건드리지 않는다. 다만 다른 매장 야간 직원을 지원으로 빌려 썼다면
+    // 그 매장 쪽 야간 칸에도 반영해서, 나중에 그 매장을 따로 돌릴 때 같은
+    // 사람을 이중으로 넣지 않게 한다(주간 근무 칸은 안 건드림).
+    setBoard((prev) => {
+      const nb = { ...prev };
+      const own = { ...(prev[storeId] || {}) };
+      weekDates.forEach((d) => {
+        own[d] = next[storeId][d] || {};
       });
+      nb[storeId] = own;
+      STORES.forEach((s) => {
+        if (s.id === storeId) return;
+        const otherDay = { ...(prev[s.id] || {}) };
+        weekDates.forEach((d) => {
+          const night = next[s.id]?.[d]?.night || [];
+          otherDay[d] = { ...(otherDay[d] || {}), night };
+        });
+        nb[s.id] = otherDay;
+      });
+      return nb;
     });
-    setAutoMap(marks);
+    setAutoMap((prev) => {
+      const store = { ...(prev[storeId] || {}) };
+      weekDates.forEach((d) => {
+        if (!(lockMap[storeId] || {})[d]) store[d] = true;
+      });
+      return { ...prev, [storeId]: store };
+    });
     setAutoBusy(false);
     // 요일을 클릭해야 상세가 보인다는 걸 모르는 사용자를 위해 월요일을 미리 열어 보여준다
     setSelected(weekDates[0]);
@@ -1371,7 +1413,7 @@ export default function ScheduleDemo() {
                   스케줄 짜는 중… ({autoProgress}/{AUTO_TRIES})
                 </span>
               ) : (
-                "자동으로 짜기 (전 매장)"
+                `이번 주 자동으로 짜기 (${storeName(storeId)})`
               )}
             </button>
             {hasSchedule && (

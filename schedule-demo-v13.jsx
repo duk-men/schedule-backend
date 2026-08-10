@@ -962,6 +962,34 @@ export default function ScheduleDemo() {
     return () => clearTimeout(saveStateTimer.current);
   }, [board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks, dbLoaded]);
 
+  // 이력 탭: 이 매장·이 주에 대해 과거 자동 배정 스냅샷(schedule_runs)을 불러온다
+  const [runs, setRuns] = useState([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [runsError, setRunsError] = useState(null);
+  const [openRunId, setOpenRunId] = useState(null);
+
+  useEffect(() => {
+    if (tab !== "history" || !supabase) return;
+    let cancelled = false;
+    setRunsLoading(true);
+    setRunsError(null);
+    supabase
+      .from("schedule_runs")
+      .select("*")
+      .eq("store_id", storeId)
+      .eq("week_start", weekStart)
+      .order("created_at", { ascending: false })
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) setRunsError(error.message);
+        else setRuns(data || []);
+        setRunsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, storeId, weekStart]);
+
   // 필요 인원을 바꾸면 곡선 캐시를 비우고 다시 계산하게 한다
   function patchNeed(key, kind, value) {
     const next = { ...needs, [key]: { ...needs[key], [kind]: value } };
@@ -1813,6 +1841,7 @@ export default function ScheduleDemo() {
             ["board", "근무표"],
             ["people", "직원"],
             ["rules", "규칙"],
+            ["history", "이력"],
           ].map(([key, label]) => (
             <button
               key={key}
@@ -2943,6 +2972,165 @@ export default function ScheduleDemo() {
             보충입니다. 주 단위로 금토일을 먼저 잡고 평일을 채웁니다. 야간은 자기 매장 인력을 먼저
             쓰고, 안 되면 주 6일까지 늘린 뒤, 그래도 모자라면 다른 지점 야간 직원이 지원을 옵니다.
           </p>
+        </div>
+      )}
+
+      {/* 이력 */}
+      {tab === "history" && (
+        <div className="px-4 pb-8">
+          {!supabase && (
+            <p className="mt-3 text-xs" style={{ color: MUTED }}>
+              DB가 연결되지 않아 이력을 볼 수 없습니다.
+            </p>
+          )}
+          {supabase && (
+            <>
+              <p className="mt-3 font-mono text-[11px]" style={{ color: MUTED }}>
+                {storeName(storeId)} · {weekStart.slice(5).replace("-", "/")} 주에 돌린 자동 배정 기록
+              </p>
+              {runsLoading && (
+                <p className="mt-2 text-xs" style={{ color: MUTED }}>
+                  불러오는 중…
+                </p>
+              )}
+              {runsError && (
+                <p className="mt-2 text-xs" style={{ color: ALERT }}>
+                  {runsError}
+                </p>
+              )}
+              {!runsLoading && !runsError && runs.length === 0 && (
+                <p className="mt-2 text-xs" style={{ color: MUTED }}>
+                  이 매장·이 주로 자동 배정을 돌린 기록이 아직 없습니다.
+                </p>
+              )}
+              <div className="mt-2 flex flex-col gap-2">
+                {runs.map((run) => {
+                  const open = openRunId === run.id;
+                  const emps = run.employees_snapshot || [];
+                  const rules = run.rules_snapshot || {};
+                  return (
+                    <div
+                      key={run.id}
+                      className="rounded-lg p-3"
+                      style={{ background: CARD, border: `1px solid ${RULE}` }}
+                    >
+                      <button
+                        className="flex w-full items-center justify-between text-left active:opacity-60"
+                        onClick={() => setOpenRunId(open ? null : run.id)}
+                      >
+                        <span className="font-mono text-[11px]">
+                          {new Date(run.created_at).toLocaleString("ko-KR")}
+                        </span>
+                        <span className="flex items-center gap-2">
+                          <span
+                            className="rounded px-1 py-[1px] font-mono text-[10px]"
+                            style={
+                              run.status === "OPTIMAL"
+                                ? { background: "#E4EDE9", color: FILLED }
+                                : { background: "#F7E6E1", color: ALERT }
+                            }
+                          >
+                            {run.status}
+                          </span>
+                          {run.warnings?.length > 0 && (
+                            <span className="font-mono text-[10px]" style={{ color: ALERT }}>
+                              경고 {run.warnings.length}
+                            </span>
+                          )}
+                          <span style={{ color: MUTED }}>{open ? "▲" : "▼"}</span>
+                        </span>
+                      </button>
+
+                      {open && (
+                        <div
+                          className="mt-2 flex flex-col gap-3 rounded-md p-3"
+                          style={{ background: "#F7F6F2", border: `1px solid ${RULE}` }}
+                        >
+                          <div>
+                            <div className="text-xs font-semibold">직원 설정 ({emps.length}명)</div>
+                            <div className="mt-1 overflow-x-auto">
+                              <table className="w-full font-mono text-[10px]" style={{ color: MUTED }}>
+                                <thead>
+                                  <tr className="text-left">
+                                    <th className="pr-2">이름</th>
+                                    <th className="pr-2">상한</th>
+                                    <th className="pr-2">최소</th>
+                                    <th className="pr-2">쩜오</th>
+                                    <th className="pr-2">8시</th>
+                                    <th className="pr-2">avail</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {emps.map((e) => (
+                                    <tr key={e.id} style={{ color: INK }}>
+                                      <td className="pr-2 py-[2px]">{e.name}</td>
+                                      <td className="pr-2">{e.maxPerWeek}</td>
+                                      <td className="pr-2">{e.minPerWeek}</td>
+                                      <td className="pr-2">{e.maxHalf}</td>
+                                      <td className="pr-2">{e.canEightStart ? "O" : "-"}</td>
+                                      <td className="pr-2">
+                                        {e.avail?.weekday || e.avail?.peak
+                                          ? `평 ${
+                                              e.avail.weekday
+                                                ? e.avail.weekday.map((b) => bucketLabel(b)).join("-")
+                                                : "전체"
+                                            } / 피 ${
+                                              e.avail.peak
+                                                ? e.avail.peak.map((b) => bucketLabel(b)).join("-")
+                                                : "전체"
+                                            }`
+                                          : "-"}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="text-xs font-semibold">규칙</div>
+                            <div
+                              className="mt-1 font-mono text-[10px] leading-relaxed"
+                              style={{ color: MUTED }}
+                            >
+                              weekCap {rules.weekCap} · shortage {rules.shortage} · requireSlotFill{" "}
+                              {String(rules.requireSlotFill)}
+                              <br />
+                              floor {rules.floor?.from}–{rules.floor?.until} min {rules.floor?.min} ceil{" "}
+                              {rules.floor?.ceil}
+                              <br />
+                              bread 평 {rules.bread?.weekday != null ? bucketLabel(rules.bread.weekday) : "-"} /
+                              피 {rules.bread?.peak != null ? bucketLabel(rules.bread.peak) : "-"}
+                              <br />
+                              초과근무 허용 +{rules.overtime?.maxExtraShifts}회 / +
+                              {rules.overtime?.maxExtraUnits}단위
+                            </div>
+                          </div>
+
+                          {run.warnings?.length > 0 && (
+                            <div>
+                              <div className="text-xs font-semibold" style={{ color: ALERT }}>
+                                경고
+                              </div>
+                              <ul
+                                className="mt-1 font-mono text-[10px] leading-relaxed"
+                                style={{ color: MUTED }}
+                              >
+                                {run.warnings.map((w, i) => (
+                                  <li key={i}>- {w}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       )}
 

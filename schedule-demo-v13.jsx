@@ -823,6 +823,146 @@ function scoreBoard(board, dates, employees, breadWeekday, breadPeak) {
 }
 
 /* ------------------------------------------------------------------
+   이력 스냅샷 표시 (읽기 전용) — 직원 탭/규칙 탭과 같은 필드를 그대로 보여주되
+   버튼 대신 텍스트로. 이력 팝업에서만 쓴다.
+   ------------------------------------------------------------------ */
+function SnapshotEmployeeCard({ e }) {
+  return (
+    <div className="rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold">{e.name}</span>
+        {e.until && (
+          <span
+            className="rounded px-1 py-[1px] font-mono text-[10px]"
+            style={{ background: "#F7E6E1", color: ALERT }}
+          >
+            {e.until.slice(5).replace("-", "/")}까지
+          </span>
+        )}
+        {Object.keys(e.pins || {}).length > 0 && (
+          <span
+            className="rounded px-1 py-[1px] font-mono text-[10px]"
+            style={{ background: "#E4EDE9", color: FILLED }}
+          >
+            {Object.entries(e.pins)
+              .map(([d, k]) => `${Number(d.slice(8))}일 ${slotInfo(k)?.label ?? k}`)
+              .join(", ")}
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[10px]" style={{ color: MUTED }}>
+          {e.kind === "night" ? "야간" : "주간"}
+        </span>
+      </div>
+
+      {e.kind === "day" && (
+        <div
+          className="mt-2 font-mono text-[11px]"
+          style={{ color: e.canEightStart ? FILLED : MUTED }}
+        >
+          8시 시작 {e.canEightStart ? "가능" : "불가"}
+        </div>
+      )}
+
+      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px]" style={{ color: MUTED }}>
+        <div>
+          주 최대 <span style={{ color: INK }}>{e.maxPerWeek}</span>
+        </div>
+        <div>
+          주 최소 <span style={{ color: INK }}>{e.minPerWeek}</span>
+        </div>
+        <div>
+          평일 최대 <span style={{ color: INK }}>{e.maxWeekday ?? "제한없음"}</span>
+        </div>
+        <div>
+          쩜오 상한 <span style={{ color: INK }}>{e.maxHalf}</span>
+        </div>
+      </div>
+
+      <div className="mt-2 font-mono text-[11px]" style={{ color: MUTED }}>
+        가능 시간 · 평일{" "}
+        {e.avail?.weekday
+          ? `${bucketLabel(e.avail.weekday[0])}~${bucketLabel(e.avail.weekday[1])}`
+          : "종일"}{" "}
+        / 금토일{" "}
+        {e.avail?.peak ? `${bucketLabel(e.avail.peak[0])}~${bucketLabel(e.avail.peak[1])}` : "종일"}
+      </div>
+
+      {(e.fixedDays || []).length > 0 && (
+        <div className="mt-2 font-mono text-[11px]" style={{ color: MUTED }}>
+          고정 요일 · {e.fixedDays.map((i) => WD[i]).join(", ")}
+        </div>
+      )}
+
+      {(e.vacations || []).length > 0 && (
+        <div className="mt-2 font-mono text-[11px]" style={{ color: MUTED }}>
+          휴가 · {e.vacations.map((d) => d.slice(5).replace("-", "/")).join(", ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SnapshotRules({ rules, needs }) {
+  const shortageLabel = {
+    leave: "비워두기",
+    half: "쩜오만",
+    extra: "하루 더만",
+    both: "쩜오 먼저, 그래도 모자라면 하루 더",
+  }[rules.shortage];
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+        <div className="text-sm font-semibold">근무타입</div>
+        <div className="mt-1 font-mono text-[10px]" style={{ color: MUTED }}>
+          평일 / 금토일
+        </div>
+        <div className="mt-2 flex flex-col gap-1">
+          {ALL_SLOTS.map((s) => (
+            <div key={s.key} className="flex items-center gap-2 py-1">
+              <span
+                className="w-9 rounded text-center font-mono text-[9px] font-semibold"
+                style={{ background: s.color, color: PAPER }}
+              >
+                {s.short}
+              </span>
+              <span className="w-14 text-xs font-medium">{s.label}</span>
+              <span className="font-mono text-[11px]" style={{ color: MUTED }}>
+                {timeText(s)}
+              </span>
+              <span className="ml-auto font-mono text-[11px]" style={{ color: MUTED }}>
+                {s.half ? "보충" : `${needs?.[s.key]?.weekday ?? 0} / ${needs?.[s.key]?.peak ?? 0}명`}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+        <div className="text-sm font-semibold">연속 근무·휴게·빵</div>
+        <div className="mt-2 font-mono text-[11px] leading-relaxed" style={{ color: MUTED }}>
+          주 근무일 상한 {rules.weekCap}일 · 초과근무 허용 +{rules.overtime?.maxExtraShifts}회 / +
+          {rules.overtime?.maxExtraUnits}단위
+          <br />
+          바 인원 기준 {rules.floor?.from != null ? bucketLabel(rules.floor.from) : "-"}~
+          {rules.floor?.until != null ? bucketLabel(rules.floor.until) : "-"} 최소 {rules.floor?.min}명
+          / 상한 {rules.floor?.ceil}명
+          <br />
+          빵 배송 · 평일 {rules.bread?.weekday != null ? bucketLabel(rules.bread.weekday) : "-"} / 금토일{" "}
+          {rules.bread?.peak != null ? bucketLabel(rules.bread.peak) : "-"}
+        </div>
+      </div>
+
+      <div className="rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+        <div className="text-sm font-semibold">평일에 인원이 모자랄 때</div>
+        <div className="mt-2 font-mono text-[11px]" style={{ color: MUTED }}>
+          {shortageLabel ?? rules.shortage} · requireSlotFill {String(rules.requireSlotFill)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
    화면
    ------------------------------------------------------------------ */
 export default function ScheduleDemo() {
@@ -966,7 +1106,7 @@ export default function ScheduleDemo() {
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState(null);
-  const [openRunId, setOpenRunId] = useState(null);
+  const [selectedRun, setSelectedRun] = useState(null);
 
   useEffect(() => {
     if (tab !== "history" || !supabase) return;
@@ -2986,7 +3126,8 @@ export default function ScheduleDemo() {
           {supabase && (
             <>
               <p className="mt-3 font-mono text-[11px]" style={{ color: MUTED }}>
-                {storeName(storeId)} · {weekStart.slice(5).replace("-", "/")} 주에 돌린 자동 배정 기록
+                {storeName(storeId)} · {weekStart.slice(5).replace("-", "/")} 주에 돌린 자동 배정 기록.
+                눌러보면 그때 직원 탭·규칙 탭에 있던 값을 그대로 볼 수 있습니다.
               </p>
               {runsLoading && (
                 <p className="mt-2 text-xs" style={{ color: MUTED }}>
@@ -3004,133 +3145,119 @@ export default function ScheduleDemo() {
                 </p>
               )}
               <div className="mt-2 flex flex-col gap-2">
-                {runs.map((run) => {
-                  const open = openRunId === run.id;
-                  const emps = run.employees_snapshot || [];
-                  const rules = run.rules_snapshot || {};
-                  return (
-                    <div
-                      key={run.id}
-                      className="rounded-lg p-3"
-                      style={{ background: CARD, border: `1px solid ${RULE}` }}
-                    >
-                      <button
-                        className="flex w-full items-center justify-between text-left active:opacity-60"
-                        onClick={() => setOpenRunId(open ? null : run.id)}
+                {runs.map((run) => (
+                  <button
+                    key={run.id}
+                    onClick={() => setSelectedRun(run)}
+                    className="flex w-full items-center justify-between rounded-lg p-3 text-left active:opacity-60"
+                    style={{ background: CARD, border: `1px solid ${RULE}` }}
+                  >
+                    <span className="font-mono text-[11px]">
+                      {new Date(run.created_at).toLocaleString("ko-KR")}
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="rounded px-1 py-[1px] font-mono text-[10px]"
+                        style={
+                          run.status === "OPTIMAL"
+                            ? { background: "#E4EDE9", color: FILLED }
+                            : { background: "#F7E6E1", color: ALERT }
+                        }
                       >
-                        <span className="font-mono text-[11px]">
-                          {new Date(run.created_at).toLocaleString("ko-KR")}
+                        {run.status}
+                      </span>
+                      {run.warnings?.length > 0 && (
+                        <span className="font-mono text-[10px]" style={{ color: ALERT }}>
+                          경고 {run.warnings.length}
                         </span>
-                        <span className="flex items-center gap-2">
-                          <span
-                            className="rounded px-1 py-[1px] font-mono text-[10px]"
-                            style={
-                              run.status === "OPTIMAL"
-                                ? { background: "#E4EDE9", color: FILLED }
-                                : { background: "#F7E6E1", color: ALERT }
-                            }
-                          >
-                            {run.status}
-                          </span>
-                          {run.warnings?.length > 0 && (
-                            <span className="font-mono text-[10px]" style={{ color: ALERT }}>
-                              경고 {run.warnings.length}
-                            </span>
-                          )}
-                          <span style={{ color: MUTED }}>{open ? "▲" : "▼"}</span>
-                        </span>
-                      </button>
-
-                      {open && (
-                        <div
-                          className="mt-2 flex flex-col gap-3 rounded-md p-3"
-                          style={{ background: "#F7F6F2", border: `1px solid ${RULE}` }}
-                        >
-                          <div>
-                            <div className="text-xs font-semibold">직원 설정 ({emps.length}명)</div>
-                            <div className="mt-1 overflow-x-auto">
-                              <table className="w-full font-mono text-[10px]" style={{ color: MUTED }}>
-                                <thead>
-                                  <tr className="text-left">
-                                    <th className="pr-2">이름</th>
-                                    <th className="pr-2">상한</th>
-                                    <th className="pr-2">최소</th>
-                                    <th className="pr-2">쩜오</th>
-                                    <th className="pr-2">8시</th>
-                                    <th className="pr-2">avail</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {emps.map((e) => (
-                                    <tr key={e.id} style={{ color: INK }}>
-                                      <td className="pr-2 py-[2px]">{e.name}</td>
-                                      <td className="pr-2">{e.maxPerWeek}</td>
-                                      <td className="pr-2">{e.minPerWeek}</td>
-                                      <td className="pr-2">{e.maxHalf}</td>
-                                      <td className="pr-2">{e.canEightStart ? "O" : "-"}</td>
-                                      <td className="pr-2">
-                                        {e.avail?.weekday || e.avail?.peak
-                                          ? `평 ${
-                                              e.avail.weekday
-                                                ? e.avail.weekday.map((b) => bucketLabel(b)).join("-")
-                                                : "전체"
-                                            } / 피 ${
-                                              e.avail.peak
-                                                ? e.avail.peak.map((b) => bucketLabel(b)).join("-")
-                                                : "전체"
-                                            }`
-                                          : "-"}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-
-                          <div>
-                            <div className="text-xs font-semibold">규칙</div>
-                            <div
-                              className="mt-1 font-mono text-[10px] leading-relaxed"
-                              style={{ color: MUTED }}
-                            >
-                              weekCap {rules.weekCap} · shortage {rules.shortage} · requireSlotFill{" "}
-                              {String(rules.requireSlotFill)}
-                              <br />
-                              floor {rules.floor?.from}–{rules.floor?.until} min {rules.floor?.min} ceil{" "}
-                              {rules.floor?.ceil}
-                              <br />
-                              bread 평 {rules.bread?.weekday != null ? bucketLabel(rules.bread.weekday) : "-"} /
-                              피 {rules.bread?.peak != null ? bucketLabel(rules.bread.peak) : "-"}
-                              <br />
-                              초과근무 허용 +{rules.overtime?.maxExtraShifts}회 / +
-                              {rules.overtime?.maxExtraUnits}단위
-                            </div>
-                          </div>
-
-                          {run.warnings?.length > 0 && (
-                            <div>
-                              <div className="text-xs font-semibold" style={{ color: ALERT }}>
-                                경고
-                              </div>
-                              <ul
-                                className="mt-1 font-mono text-[10px] leading-relaxed"
-                                style={{ color: MUTED }}
-                              >
-                                {run.warnings.map((w, i) => (
-                                  <li key={i}>- {w}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
                       )}
-                    </div>
-                  );
-                })}
+                    </span>
+                  </button>
+                ))}
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* 이력 스냅샷 상세 — 직원 탭/규칙 탭과 같은 내용을, 그 시점 값 그대로 */}
+      {selectedRun && (
+        <div
+          className="fixed inset-0 z-30 flex items-end"
+          style={{ background: "rgba(22,32,43,0.4)" }}
+          onClick={() => setSelectedRun(null)}
+        >
+          <div
+            className="max-h-[85vh] w-full overflow-y-auto rounded-t-2xl p-4"
+            style={{ background: PAPER, paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">
+                {new Date(selectedRun.created_at).toLocaleString("ko-KR")}
+              </span>
+              <span
+                className="rounded px-1 py-[1px] font-mono text-[10px]"
+                style={
+                  selectedRun.status === "OPTIMAL"
+                    ? { background: "#E4EDE9", color: FILLED }
+                    : { background: "#F7E6E1", color: ALERT }
+                }
+              >
+                {selectedRun.status}
+              </span>
+              <button
+                onClick={() => setSelectedRun(null)}
+                className="ml-auto font-mono text-xs active:opacity-60"
+                style={{ color: MUTED }}
+              >
+                닫기
+              </button>
+            </div>
+
+            {(() => {
+              const emps = (selectedRun.employees_snapshot || []).filter(
+                (e) => e.storeId === selectedRun.store_id
+              );
+              const guests = (selectedRun.employees_snapshot || []).filter(
+                (e) => e.storeId !== selectedRun.store_id
+              );
+              const rules = selectedRun.rules_snapshot || {};
+              return (
+                <>
+                  <div className="mt-4 text-sm font-semibold">직원 ({emps.length}명)</div>
+                  <div className="mt-2 flex flex-col gap-2">
+                    {emps.map((e) => (
+                      <SnapshotEmployeeCard key={e.id} e={e} />
+                    ))}
+                  </div>
+                  {guests.length > 0 && (
+                    <p className="mt-2 font-mono text-[11px]" style={{ color: GUEST }}>
+                      타 지점 야간 지원 후보로 같이 고려됨: {guests.map((e) => e.name).join(", ")}
+                    </p>
+                  )}
+
+                  <div className="mt-5 text-sm font-semibold">규칙</div>
+                  <div className="mt-2">
+                    <SnapshotRules rules={rules} needs={selectedRun.needs_snapshot} />
+                  </div>
+
+                  {selectedRun.warnings?.length > 0 && (
+                    <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+                      <div className="text-sm font-semibold" style={{ color: ALERT }}>
+                        경고
+                      </div>
+                      <ul className="mt-1 font-mono text-[11px] leading-relaxed" style={{ color: MUTED }}>
+                        {selectedRun.warnings.map((w, i) => (
+                          <li key={i}>- {w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
 

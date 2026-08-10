@@ -1338,7 +1338,12 @@ export default function ScheduleDemo() {
         weekCap: WEEK_CAP,
         startShared: START_SHARED,
         floor: { from: FLOOR_FROM, until: FLOOR_UNTIL, min: FLOOR_MIN, ceil: MAX_FLOOR },
-        break: { len: BREAK_LEN, afterStart: tb(2), beforeEnd: 0, concurrent: 1 },
+        // afterStart: 출근 후 최소 몇 시간 지나야 휴게를 쓸 수 있는지. 너무 짧으면(예전 1시간)
+        // 바 인원 최소치가 걸리지 않는 이른 시간대(예: 8~11시)로 솔버가 휴게를 몰아넣는다 —
+        // 그 구간엔 페널티가 없으니 "공짜"로 보이기 때문이다. 3.5시간으로 늘리면 8시 출근은
+        // 11:30부터, 9시(짭오)는 정확히 12:30부터, 12시(마감)는 정확히 15:30부터로, 예전
+        // "오픈조 12:30·마감조 15:30" 기준과 거의 그대로 맞아떨어진다.
+        break: { len: BREAK_LEN, afterStart: tb(3, 30), beforeEnd: 0, concurrent: 1 },
         bread: { weekday: breadWeekday, peak: breadPeak, len: BREAD_LEN },
         overtime: { maxExtraShifts: 1, maxExtraUnits: 2 },
         shortage,

@@ -249,6 +249,7 @@ def solve(req: SolveRequest) -> SolveResponse: ...
 | `startShared` | 요청값으로 8시 그룹 배타 제약 생성 |
 | `shortage` | `"leave"`면 extra·half 슬롯 상한을 0으로 (평일만) |
 | `canEightStart` | false면 8시 시작 슬롯(from이 8시인 슬롯 전부, half 포함) 전체에 대해 x 변수 미생성 |
+| `isRookie` | 신입 두 명이 같은 날 8시 자리+9시 자리를 나눠 맡는 조합을 하드로 금지 (3.5절). 신입 혼자 서는 건 무관 |
 | `familyStartCap` | 오전(9/10시 시작)·오후(12/13시 시작) 슬롯을 각각 계열로 묶어 직원별 주당 합을 이 값 이하로 제한 |
 | `maxWeekday` | 월~금(피크 여부 무관) 출근 횟수 상한. 수요 계산의 `is_peak`(금토일)과는 별개 개념 |
 | 쩜오 순서 | half를 하나라도 쓰려면 그 직원의 풀타임 출근 횟수가 이미 `min(maxPerWeek, weekCap)`에 도달해 있어야 함 (하드) |
@@ -443,8 +444,8 @@ v1은 **주 단위 고정**을 권한다. 달 단위는 변수가 4배 이상 �
 
 ### 11.1 테이블
 
-`supabase/schema.sql`, `supabase/schema_v2_schedule_runs.sql`을 Supabase SQL Editor에서
-순서대로 한 번씩 실행하면 만들어진다.
+`supabase/schema.sql`, `supabase/schema_v2_schedule_runs.sql`, `supabase/schema_v3_is_rookie.sql`을
+Supabase SQL Editor에서 순서대로 한 번씩 실행하면 만들어진다.
 
 | 테이블 | 내용 |
 |---|---|

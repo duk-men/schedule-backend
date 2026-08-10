@@ -53,15 +53,37 @@ def solve(req: SolveRequest) -> SolveResponse:
         s = SLOTS[key]
         return s["peak"] if is_peak(d_str) else s["need"]
 
+    # frm(시작 시각)별로 묶은 비half 슬롯 (야간 포함 — 원래 demand_curve도 야간을
+    # 포함했다). 3절 그룹 배타 제약과 같은 기준이다 — 같은 frm에 슬롯이 여럿(대체
+    # 가능한 그룹, 예: 찐오/이른오전/오전쩜오)이면 그중 하나만 그날 실제로 쓰인다.
+    frm_groups = defaultdict(list)
+    for key, s in SLOTS.items():
+        if s["half"]:
+            continue
+        frm_groups[s["frm"]].append(key)
+    sorted_frms = sorted(frm_groups)
+
     def demand_curve(d_str):
         arr = [0] * BPD
-        for key, s in SLOTS.items():
-            if s["half"]:
-                continue
-            n = need_of(key, d_str)
+        for idx, frm in enumerate(sorted_frms):
+            keys = frm_groups[frm]
+            n = max(need_of(k, d_str) for k in keys)
             if not n:
                 continue
-            for i in range(s["frm"], s["to"]):
+            cap_to = max(SLOTS[k]["to"] for k in keys)
+            active_keys = [k for k in keys if k not in req.rules.startShared]
+            if len(active_keys) >= 2:
+                # 대체 그룹은 그중 한 슬롯만 실제로 서므로, 그룹 대표(가장 긴 슬롯,
+                # 예: 찐오 8-18)의 전체 길이를 그대로 요구하면 이른오전(8-15)이 대신
+                # 배정된 날 15~18시가 "유령 부족"으로 잡힌다. 그날 필요한 다음 그룹이
+                # 시작하는 시점까지만 이 그룹 전용 수요로 잡고, 그 이후는 다음 그룹
+                # (짭오 등)이 이어받는다고 본다.
+                for later_frm in sorted_frms[idx + 1:]:
+                    later_keys = frm_groups[later_frm]
+                    if max(need_of(k, d_str) for k in later_keys) > 0:
+                        cap_to = min(cap_to, later_frm)
+                        break
+            for i in range(frm, cap_to):
                 arr[i % BPD] += n
         return arr
 

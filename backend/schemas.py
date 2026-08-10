@@ -112,6 +112,10 @@ class Weights(BaseModel):
     # 최소치) 순으로, 못 채울 때 어느 쪽을 먼저 포기할지를 정한다.
     requireFillShort: float = 20000
     hardFloorShort: float = 8000
+    # 가장 적게 채워진 금토일의 11~21시 총 커버리지가, 가장 많이 채워진 평일의 그것보다
+    # 작지 않도록 하는 완화 페널티. 위 둘(진짜 커버리지 부족)보다는 약하게 — "형태"에
+    # 대한 선호라 실제 인원 부족보다 우선순위가 낮다.
+    peakIntegralShort: float = 5000
 
 
 class SolveRequest(BaseModel):
@@ -156,6 +160,7 @@ class Penalties(BaseModel):
     underWeek: float = 0        # 개인 상한을 다 못 채운 채 남는 여력 페널티
     requireFillShort: float = 0  # 필수 자리(2.5절)를 인력 부족으로 못 채운 만큼
     hardFloorShort: float = 0    # 바 인원 최소치(12.5절)를 인력 부족으로 못 채운 만큼
+    peakIntegralShort: float = 0  # 금토일 최소 적분값이 평일 최대 적분값보다 부족한 만큼 (12.6절)
 
 
 class Diagnostics(BaseModel):

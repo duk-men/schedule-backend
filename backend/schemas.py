@@ -95,9 +95,6 @@ class Weights(BaseModel):
     fairness: float = 100
     minWeek: float = 500
     overtime: float = 180
-    # 금토일 12~17시 전용 추가 항. 기존 floor(11~17, 요일 무관)와 별개로 쌓인다.
-    peakFloorShort: float = 6   # 이 시간대 2명 미만이면 분당 추가 페널티
-    peakFloorPref3: float = 1   # 이 시간대 3명 미만이면 분당 완만한 추가 페널티 (3명 유도)
     # 월~목을 다 채우고 남는 여유 인력을 일>토>금 순으로 배치하도록 하는 보상 (건당).
     # underWeek가 남는 여력을 어딘가에 채우도록 밀어붙이는 이상, 그 "어디"를 정하는
     # 이 항도 over(과잉 인원) 페널티 차이를 이길 만큼 충분히 세야 한다. 너무 작으면
@@ -149,7 +146,6 @@ class Penalties(BaseModel):
     fairness: float
     minWeek: float
     overtime: float
-    peakFloor: float = 0        # 금토일 12~17시 전용 추가 페널티 (peakFloorShort + peakFloorPref3)
     weekendExtra: float = 0     # 일>토>금 여유 인력 보상 (음수일수록 그 방향으로 잘 쏠린 것)
     underWeek: float = 0        # 개인 상한을 다 못 채운 채 남는 여력 페널티
 

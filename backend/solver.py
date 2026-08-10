@@ -15,7 +15,7 @@ from collections import defaultdict
 
 from ortools.sat.python import cp_model
 
-from domain import BPD, BUCKET, is_peak, shift_date, tb, weekday_of
+from domain import BPD, BUCKET, blabel, is_peak, shift_date, tb, weekday_of
 from schemas import (
     Diagnostics,
     Penalties,
@@ -652,27 +652,39 @@ def solve(req: SolveRequest) -> SolveResponse:
                 m.Add(ov >= fe - ceil)
             over_terms.append(ov)
 
-    # ---------- 12.5 금토일 12~17시 바 인원 강화 ----------
-    # 기존 floor(11~17, 요일 무관, min 2)와 별개로 얹는다. 금토일 점심~초저녁은 2명
-    # 미만이면 floor보다 훨씬 강하게 페널티를 주고, 2명이어도 3명이면 더 좋다는 완만한
-    # 유도(3명 미만 소액 페널티)를 추가한다. floor_expr는 12절에서 정의한 걸 그대로 쓴다.
-    PEAK_FLOOR_FROM, PEAK_FLOOR_UNTIL = tb(12), tb(17)
-    peak_floor_short, peak_floor_pref3 = [], []
+    # ---------- 12.5 바 인원 하드 보장 ----------
+    # 금토일 12~17시는 최소 3명, 그 앞뒤(11~21시 나머지)는 최소 2명. 평일은 12~21시
+    # 최소 2명. 기존 floor(11~17, 요일 무관, min 2, 12절)는 소프트라 부족해질 수
+    # 있어서, 이건 요청에 따라 하드 제약으로 별도로 건다. 잠긴 날짜는 이미 확정된
+    # 배치라 서버가 못 바꾸므로 강제로 모순을 만들지 않고 warnings에만 남긴다.
+    def hard_floor_need(d_str, t):
+        if is_peak(d_str):
+            if tb(12) <= t < tb(17):
+                return 3
+            if tb(11) <= t < tb(21):
+                return 2
+            return 0
+        if tb(12) <= t < tb(21):
+            return 2
+        return 0
+
     for di, d_str in enumerate(dates):
-        if not is_peak(d_str):
-            continue
-        for t in range(PEAK_FLOOR_FROM, PEAK_FLOOR_UNTIL):
-            fe = floor_expr(di, t, bd.peak)
+        peak = is_peak(d_str)
+        bread = bd.peak if peak else bd.weekday
+        lo, hi = (tb(11), tb(21)) if peak else (tb(12), tb(21))
+        for t in range(lo, hi):
+            need_here = hard_floor_need(d_str, t)
+            if need_here <= 0:
+                continue
+            fe = floor_expr(di, t, bread)
             if isinstance(fe, int):
-                sv2 = max(0, 2 - fe)
-                sv3 = max(0, 3 - fe)
+                if fe < need_here:
+                    infeasible_notes.append(
+                        f"{d_str} {blabel(t)}: 잠긴 배치라 바 인원 {need_here}명을 못 채웁니다 "
+                        f"(현재 {fe}명)."
+                    )
             else:
-                sv2 = m.NewIntVar(0, 2, f"pfs2_{di}_{t}")
-                m.Add(sv2 >= 2 - fe)
-                sv3 = m.NewIntVar(0, 3, f"pfs3_{di}_{t}")
-                m.Add(sv3 >= 3 - fe)
-            peak_floor_short.append(sv2)
-            peak_floor_pref3.append(sv3)
+                m.Add(fe >= need_here)
 
     # ---------- 13. 형평 (max-min) ----------
     home_ids = [ei for ei, e in enumerate(EMP) if e["storeId"] == req.storeId]
@@ -735,8 +747,6 @@ def solve(req: SolveRequest) -> SolveResponse:
     obj += [int(round(w.gapDay)) * b for b in day_has_gap]
     obj += [int(round(w.floor * BUCKET)) * s for s in floor_short]
     obj += [int(round(w.over * BUCKET)) * o for o in over_terms]
-    obj += [int(round(w.peakFloorShort * BUCKET)) * s for s in peak_floor_short]
-    obj += [int(round(w.peakFloorPref3 * BUCKET)) * s for s in peak_floor_pref3]
     obj.append(int(round(w.fairness)) * rng)
     obj += [int(round(w.minWeek)) * s for s in minw_short.values()]
     obj += [int(round(w.overtime)) * ov for ov in overtime_units.values()]
@@ -841,10 +851,6 @@ def solve(req: SolveRequest) -> SolveResponse:
         fairness=int(round(w.fairness)) * _val(solver, rng),
         minWeek=sum(int(round(w.minWeek)) * _val(solver, s) for s in minw_short.values()),
         overtime=sum(int(round(w.overtime)) * _val(solver, ov) for ov in overtime_units.values()),
-        peakFloor=(
-            sum(int(round(w.peakFloorShort * BUCKET)) * _val(solver, s) for s in peak_floor_short)
-            + sum(int(round(w.peakFloorPref3 * BUCKET)) * _val(solver, s) for s in peak_floor_pref3)
-        ),
         weekendExtra=sum(-int(round(wt)) * _val(solver, v) for v, wt in weekend_extra_terms),
         underWeek=sum(int(round(w.underWeek)) * _val(solver, u) for u in under_week.values()),
     )

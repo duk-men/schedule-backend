@@ -147,7 +147,6 @@ server: { proxy: { "/api": "http://localhost:8000" } }
     "gapWeekday": 1, "gapPeak": 4, "gapDay": 20,
     "floor": 2, "over": 1.5,
     "fairness": 100, "minWeek": 500, "overtime": 180,
-    "peakFloorShort": 6, "peakFloorPref3": 1,
     "weekendExtraSun": 150, "weekendExtraSat": 100, "weekendExtraFri": 50,
     "underWeek": 250
   },
@@ -253,7 +252,7 @@ def solve(req: SolveRequest) -> SolveResponse: ...
 | `maxWeekday` | 월~금(피크 여부 무관) 출근 횟수 상한. 수요 계산의 `is_peak`(금토일)과는 별개 개념 |
 | 쩜오 순서 | half를 하나라도 쓰려면 그 직원의 풀타임 출근 횟수가 이미 `min(maxPerWeek, weekCap)`에 도달해 있어야 함 (하드) |
 | 마감-오픈-마감 | 캘린더 인접일이 아니라 그 직원이 실제로 근무한 바로 전/다음 날 기준으로 검사 (쉬는 날 스킵) |
-| 금토일 12~17시 | 기존 floor(11~17, 요일 무관)와 별개로 `peakFloorShort`/`peakFloorPref3` 소프트 가중치를 추가로 얹음 |
+| 바 인원 하드 보장 | 금토일 12~17시 최소 3명, 11~21시 나머지 최소 2명 / 평일 12~21시 최소 2명. 소프트 floor(11~17, 요일 무관, 12절)와 별개로 하드 제약. 잠긴 날짜라 못 채우면 강제로 틀리게 하지 않고 warnings에만 남김 |
 | 일>토>금 여유 배치 | 월~목보다 일/토/금에 여유 인력을 더 배치하도록 `weekendExtraSun/Sat/Fri`로 목적함수에 보상을 더함 (소프트). over 페널티의 요일별 차이를 이길 만큼 세야 실제로 방향이 튼다 |
 | 개인 상한 최대 활용 | 형평(13절)은 편차만 줄일 뿐 상한까지 채우진 않아서, `underWeek`로 남는 여력에 페널티를 매겨 상한까지 쓰도록 유도 (소프트, 홈 매장 직원만) |
 

@@ -95,6 +95,14 @@ class Weights(BaseModel):
     fairness: float = 100
     minWeek: float = 500
     overtime: float = 180
+    # 금토일 12~17시 전용 추가 항. 기존 floor(11~17, 요일 무관)와 별개로 쌓인다.
+    peakFloorShort: float = 6   # 이 시간대 2명 미만이면 분당 추가 페널티
+    peakFloorPref3: float = 1   # 이 시간대 3명 미만이면 분당 완만한 추가 페널티 (3명 유도)
+    # 월~목을 다 채우고 남는 여유 인력을 일>토>금 순으로 배치하도록 하는 보상 (건당).
+    # 다른 항보다 훨씬 작게 잡아 동률 상황의 타이브레이커로만 쓰인다.
+    weekendExtraSun: float = 3
+    weekendExtraSat: float = 2
+    weekendExtraFri: float = 1
 
 
 class SolveRequest(BaseModel):
@@ -135,6 +143,8 @@ class Penalties(BaseModel):
     fairness: float
     minWeek: float
     overtime: float
+    peakFloor: float = 0        # 금토일 12~17시 전용 추가 페널티 (peakFloorShort + peakFloorPref3)
+    weekendExtra: float = 0     # 일>토>금 여유 인력 보상 (음수일수록 그 방향으로 잘 쏠린 것)
 
 
 class Diagnostics(BaseModel):

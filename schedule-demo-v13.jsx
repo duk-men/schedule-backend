@@ -1203,10 +1203,9 @@ export default function ScheduleDemo() {
         Object.entries(days[d] || {}).forEach(([slot, ids]) => {
           const isHalf = slot.startsWith("half");
           ids.forEach((id) => {
-            s[id] = s[id] || { days: 0, half: 0, jjapO: 0, guest: 0 };
+            s[id] = s[id] || { days: 0, half: 0, guest: 0 };
             s[id].days += isHalf ? 0.5 : 1;
             if (isHalf) s[id].half += 1;
-            if (slot === "jjapO") s[id].jjapO += 1;
             if (empById(id) && empById(id).storeId !== sid) s[id].guest += 1;
           });
         })
@@ -2250,7 +2249,7 @@ export default function ScheduleDemo() {
 
           <div className="mt-3 flex flex-col gap-2">
             {staff.map((e) => {
-              const st = stats[e.id] || { days: 0, half: 0, jjapO: 0, guest: 0 };
+              const st = stats[e.id] || { days: 0, half: 0, guest: 0 };
               return (
                 <div key={e.id} className="rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
                   <div className="flex flex-wrap items-center gap-2">
@@ -2290,7 +2289,7 @@ export default function ScheduleDemo() {
                     >
                       <span className="text-sm font-medium">8시 시작 가능</span>
                       <span className="font-mono text-[11px]" style={{ color: e.canEightStart ? PAPER : MUTED }}>
-                        짭오 {st.jjapO}회 누적
+                        쩜오 {st.half}회 누적
                       </span>
                     </button>
                   )}

@@ -618,7 +618,15 @@ def solve(req: SolveRequest) -> SolveResponse:
         d_str = dates[di]
         terms = []
         for key, s in SLOTS.items():
-            if s["night"] or not (s["frm"] <= t < s["to"]):
+            if s["night"]:
+                # 자정을 넘겨 다음날 새벽까지 이어지는 야간도 바 인원에 넣는다.
+                # cover_expr의 야간 처리(11절)와 같은 방식이다.
+                if s["frm"] <= t < BPD:
+                    terms.append(slot_count(di, key))
+                elif t < s["to"] - BPD:
+                    terms.append(night_prev_count(di, key))
+                continue
+            if not (s["frm"] <= t < s["to"]):
                 continue
             terms.append(slot_count(di, key))
         out = sum(terms) if terms else 0

@@ -266,20 +266,30 @@ function breakPlan(day) {
 }
 
 // 휴게·빵으로 빠지기 전, 그 시간에 출근해 있는 인원(야간 제외)
-function staffOnFloor(day) {
+// prevDay: 전날 배정(야간이 자정을 넘겨 오늘 새벽까지 이어지는 걸 반영하기 위함).
+// coverage()의 야간 처리와 같은 방식이다.
+function staffOnFloor(day, prevDay) {
   const arr = new Array(BPD).fill(0);
   Object.entries(day || {}).forEach(([key, ids]) => {
     const s = slotInfo(key);
-    if (!s || s.night) return;
+    if (!s) return;
+    if (s.night) return; // 야간은 아래에서 겹침(자정 넘김)까지 따로 처리
     ids.forEach(() => {
       for (let i = s.from; i < Math.min(s.to, BPD); i++) arr[i] += 1;
     });
   });
+  const nightSlot = slotInfo("night");
+  (day?.night || []).forEach(() => {
+    for (let i = nightSlot.from; i < BPD; i++) arr[i] += 1;
+  });
+  (prevDay?.night || []).forEach(() => {
+    for (let i = 0; i < nightSlot.to - BPD; i++) arr[i] += 1;
+  });
   return arr;
 }
 
-function floorCurve(day, breaks, breadAt) {
-  const arr = staffOnFloor(day);
+function floorCurve(day, breaks, breadAt, prevDay) {
+  const arr = staffOnFloor(day, prevDay);
   breaks.forEach((b) => {
     for (let i = b.from; i < Math.min(b.to, BPD); i++) arr[i] -= 1;
   });
@@ -1177,7 +1187,7 @@ export default function ScheduleDemo() {
     [locked, serverBreaks, dayOf]
   );
   const floorOf = useCallback(
-    (date) => floorCurve(dayOf(date), breaksOf(date), breadAtOf(date)),
+    (date) => floorCurve(dayOf(date), breaksOf(date), breadAtOf(date), dayOf(shiftDate(date, -1))),
     [dayOf, breaksOf, breadAtOf]
   );
   const floorMinOf = useCallback(
@@ -1186,7 +1196,7 @@ export default function ScheduleDemo() {
   );
   // 출근 인원 중 휴게·빵으로 자리를 비운 인원만 뽑은 곡선
   const restOf = useCallback(
-    (date) => staffOnFloor(dayOf(date)).map((n, i) => n - floorOf(date)[i]),
+    (date) => staffOnFloor(dayOf(date), dayOf(shiftDate(date, -1))).map((n, i) => n - floorOf(date)[i]),
     [dayOf, floorOf]
   );
 

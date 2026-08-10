@@ -75,7 +75,6 @@ const WEEK_CAP = 6; // 어떤 경우에도 주 6일을 넘길 수 없다
 const AUTO_TRIES = 2500;
 const AUTO_CHUNK = 10; // 한 틱에 처리할 시도 수. 이 단위로 쪼개서 화면이 안 멈추게 한다
 const FILL_ORDER = ["jjinO", "jjapO", "close", "thirteen", "earlyShort", "middle"];
-const EXTRA_ORDER = ["jjapO", "earlyShort", "middle"];
 
 /* ------------------------------------------------------------------
    날짜 유틸
@@ -609,11 +608,12 @@ function autoAssignAll({
         place(store.id, date, key, pool(store.id, slot, date).slice(0, want));
       }
 
-      // 여유분. 그 주에 인력이 남고, 실제로 그 시간대가 부족할 때만 쓴다
+      // 여유분. 그 주에 인력이 남고, 실제로 그 시간대가 부족할 때만 쓴다.
+      // FILL_ORDER 순서 그대로 돌아서, 필수 자리(찐오/마감/13)가 위 단계에서
+      // 못 채워졌으면 미들·짭오 같은 여유 자리보다 먼저 이 자리부터 재시도한다.
       if ((weekSlack[`${store.id}|${weekKey(date)}`] || 0) > 0) {
-        for (const key of EXTRA_ORDER) {
+        for (const key of FILL_ORDER) {
           const slot = slotInfo(key);
-          if (!slot.extra) continue;
           const room = needOf(slot, date) + slot.extra - (day[key] || []).length;
           if (room <= 0) continue;
           if (gapCut(slot, combinedGap(day, prevDayObj, date)) < 1) continue;
@@ -624,9 +624,8 @@ function autoAssignAll({
 
       // 금토일은 비면 안 되므로 설정과 무관하게 총동원
       const mode = isPeak(date) ? "both" : shortage;
-      if (mode === "leave") continue;
-      const useHalf = mode === "half" || mode === "both";
-      const useExtra = mode === "extra" || mode === "both";
+      const useHalf = mode !== "leave" && (mode === "half" || mode === "both");
+      const useExtra = mode !== "leave" && (mode === "extra" || mode === "both");
 
       if (useHalf) {
         for (let round = 0; round < 4; round++) {
@@ -662,6 +661,7 @@ function autoAssignAll({
           place(store.id, date, key, pool(store.id, slot, date, { capBonus: 1 }).slice(0, 1));
         }
       }
+
     }
   }
 
@@ -679,8 +679,12 @@ function scoreBoard(board, dates, employees, breadWeekday, breadPeak) {
     dates.forEach((d) => {
       const day = board[st.id][d] || {};
       const prev = board[st.id][shiftDate(d, -1)] || {};
+      const dayGapMin = gapMinutes(gapOf(coverage(day, prev), d));
       // 금토일 결손은 훨씬 무겁게 본다
-      penalty += gapMinutes(gapOf(coverage(day, prev), d)) * (isPeak(d) ? 4 : 1);
+      penalty += dayGapMin * (isPeak(d) ? 4 : 1);
+      // 총 부족 시간이 같다면, 여러 날에 흩어지는 것보다 하루에 몰리는 쪽이
+      // 손보기 쉬우므로 부족이 걸리는 날 수 자체에도 약하게 감점을 준다
+      if (dayGapMin > 0) penalty += 20;
       const floor = floorCurve(day, breakPlan(day), isPeak(d) ? breadPeak : breadWeekday);
       penalty += gapMinutes(floorGap(floor)) * 2;
       // 필요 이상으로 사람이 몰리는 시간대도 감점 (적은 인원을 효율적으로 쓰기 위함)
@@ -992,6 +996,9 @@ export default function ScheduleDemo() {
     [scopeDates, gapMinOf, hasSchedule]
   );
   const peakShortDays = useMemo(() => shortDays.filter(isPeak), [shortDays]);
+  // 잠긴 날짜는 자동 배정이 손대지 않고 그대로 둔다. 수동으로 편집했던 날이
+  // 계속 남아 아무리 다시 돌려도 그 자리가 안 채워지는 걸 놓치기 쉬워 따로 알려준다.
+  const weekLockedDays = useMemo(() => weekDates.filter((d) => locked[d]), [weekDates, locked]);
   const floorRiskDays = useMemo(
     () => (hasSchedule ? scopeDates.filter((d) => floorMinOf(d) < FLOOR_MIN) : []),
     [scopeDates, floorMinOf, hasSchedule]
@@ -1456,6 +1463,17 @@ export default function ScheduleDemo() {
             </div>
           )}
 
+          {view === "week" && weekLockedDays.length > 0 && (
+            <div
+              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+              style={{ background: "#EAE8E1", color: MUTED }}
+            >
+              🔒 {weekLockedDays.map((d) => Number(d.slice(8))).join(", ")}일은 잠겨 있어 "이번 주
+              자동으로 짜기"를 눌러도 그대로 유지됩니다. 빈 자리가 안 없어진다면 이 날짜를 먼저
+              풀어보세요.
+            </div>
+          )}
+
           {/* 주간 표 */}
           {view === "week" && (
             <>
@@ -1470,16 +1488,26 @@ export default function ScheduleDemo() {
                       const peak = isPeak(d);
                       const isSel = selected === d;
                       const short = hasSchedule && gapMinOf(d) > 0;
+                      const isDayLocked = !!locked[d];
                       return (
                         <button
                           key={d}
                           onClick={() => setSelected(isSel ? null : d)}
-                          className="rounded-t py-1 active:opacity-60"
+                          className="relative rounded-t py-1 active:opacity-60"
                           style={{
                             background: isSel ? INK : short ? "#F7E6E1" : peak ? "#E4E1D8" : "transparent",
                             color: isSel ? PAPER : short ? ALERT : INK,
                           }}
                         >
+                          {isDayLocked && (
+                            <span
+                              className="absolute right-1 top-1 font-mono"
+                              style={{ fontSize: 8, color: isSel ? PAPER : MUTED }}
+                              title="잠긴 날짜 — 자동 배정에서 제외됨"
+                            >
+                              🔒
+                            </span>
+                          )}
                           <div className="font-mono text-[10px] font-semibold">
                             {WD[wdIndex(parse(d))]}
                           </div>

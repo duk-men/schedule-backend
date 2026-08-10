@@ -53,9 +53,12 @@ class FloorRule(BaseModel):
 
 
 class BreakRule(BaseModel):
+    # afterStart/beforeEnd/concurrent는 휴게가 CP-SAT 결정변수였을 때 쓰던 값이다.
+    # 이제 휴게 시각은 고정 규칙(오픈 12:30·마감 15:30, solver.py 10절)이라 실제로는
+    # len만 쓰인다. 필드는 API 호환을 위해 남겨둔다.
     len: int
-    afterStart: int
-    beforeEnd: int
+    afterStart: int = 0
+    beforeEnd: int = 0
     concurrent: int = 1
 
 

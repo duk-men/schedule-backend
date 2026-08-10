@@ -219,11 +219,18 @@ def solve(req: SolveRequest) -> SolveResponse:
             if v:
                 m.Add(sum(v) <= cap)
 
-    # ---------- 2.5 requireSlotFill (9.1 확정: true) ----------
+    # ---------- 2.5 requireSlotFill (9.1 확정: true, 완화 모드에서는 소프트) ----------
     # 같은 시각 출근 그룹(3번 제약과 동일하게 묶음) 단위로 건다. "찐오가 꼭 필요하다"보다는
     # "8시에 여는 사람이 꼭 필요하다"가 실제 요구이고, 그 8시 자리는 어차피 그룹 배타 제약
     # 때문에 한 명만 쓸 수 있다. 그래서 이른오전/오전쩜오가 그 한 명을 맡아도 찐오의
     # 필요인원을 채운 것으로 본다 (배정서처럼 찐오 자격 없이 8시대만 가능한 사람을 위함).
+    #
+    # 인원이 진짜로 모자라면(예: 종료일이 지나 후보가 줄어든 주) 이 자체가 INFEASIBLE의
+    # 원인이 된다. "완전히 실패" 대신 "빈 자리 표시하면서 최선을 다한 표"를 위해 하드가
+    # 아니라 아주 무거운 페널티를 주는 소프트 제약으로 둔다 — 채울 수 있으면 페널티가
+    # 다른 모든 항을 압도하므로 사실상 하드와 같고, 정말 못 채울 때만 그 자리를 비운 채로
+    # 최선의 나머지 배치를 찾는다. fill_shortfall은 결과 추출 단계에서 warnings로 남긴다.
+    fill_shortfall = []
     if req.rules.requireSlotFill:
         fill_groups = defaultdict(list)
         for key, s in SLOTS.items():
@@ -237,17 +244,14 @@ def solve(req: SolveRequest) -> SolveResponse:
                 need = max(need_of(k, d_str) for k in keys)
                 if need <= 0:
                     continue
+                label = SLOTS[max(keys, key=lambda k: need_of(k, d_str))]["label"]
                 v = [X(ei, di, k) for k in keys for ei in range(E) if X(ei, di, k) is not None]
                 if v:
-                    m.Add(sum(v) >= need)
+                    short = m.NewIntVar(0, need, f"reqfail_{di}_{_frm}")
+                    m.Add(short >= need - sum(v))
                 else:
-                    label = SLOTS[max(keys, key=lambda k: need_of(k, d_str))]["label"]
-                    z = m.NewBoolVar(f"reqfail_{di}_{_frm}")
-                    m.Add(z == 0)
-                    m.Add(z == 1)
-                    infeasible_notes.append(
-                        f"{d_str} {label}: 필요 인원 {need}명인데 배정 가능한 직원이 없습니다."
-                    )
+                    short = need  # 배정 가능한 후보 자체가 없어 항상 이만큼 못 채운다
+                fill_shortfall.append((short, d_str, label, need))
 
     # ---------- 3. 같은 시각 출근 그룹 배타 (startShared 일반화) ----------
     # 쩜오(half)도 포함한다 — 8시 출근(찐오/이른오전/오전쩜오)은 슬롯 종류가 달라도
@@ -660,11 +664,13 @@ def solve(req: SolveRequest) -> SolveResponse:
                 m.Add(ov >= fe - ceil)
             over_terms.append(ov)
 
-    # ---------- 12.5 바 인원 하드 보장 ----------
+    # ---------- 12.5 바 인원 최소 보장 (사실상 하드, 정말 못 채우면 소프트로 완화) ----------
     # 금토일 12~17시는 최소 3명, 그 앞뒤(11~21시 나머지)는 최소 2명. 평일은 12~21시
-    # 최소 2명. 기존 floor(11~17, 요일 무관, min 2, 12절)는 소프트라 부족해질 수
-    # 있어서, 이건 요청에 따라 하드 제약으로 별도로 건다. 잠긴 날짜는 이미 확정된
-    # 배치라 서버가 못 바꾸므로 강제로 모순을 만들지 않고 warnings에만 남긴다.
+    # 최소 2명. 기존 floor(11~17, 요일 무관, min 2, 12절)는 훨씬 약한 페널티라 부족해질
+    # 수 있어서 별도로 건다. requireSlotFill과 같은 이유로 진짜 하드가 아니라 아주 무거운
+    # 페널티로 둔다 — 채울 수 있으면 페널티가 다른 항을 압도해 사실상 하드지만, 인원이
+    # 정말 모자라면 그 시간대만 미달로 남기고 나머지는 최선으로 채운다. 잠긴 날짜는
+    # 서버가 못 바꾸는 확정 배치라 그대로 warnings로만 남긴다(사후 집계, 아래 참고).
     def hard_floor_need(d_str, t):
         if is_peak(d_str):
             if tb(12) <= t < tb(17):
@@ -676,6 +682,7 @@ def solve(req: SolveRequest) -> SolveResponse:
             return 2
         return 0
 
+    hard_floor_shortfall = []
     for di, d_str in enumerate(dates):
         peak = is_peak(d_str)
         bread = bd.peak if peak else bd.weekday
@@ -686,13 +693,17 @@ def solve(req: SolveRequest) -> SolveResponse:
                 continue
             fe = floor_expr(di, t, bread)
             if isinstance(fe, int):
-                if fe < need_here:
+                short = max(0, need_here - fe)
+                if d_str in locked_set and short > 0:
                     infeasible_notes.append(
                         f"{d_str} {blabel(t)}: 잠긴 배치라 바 인원 {need_here}명을 못 채웁니다 "
                         f"(현재 {fe}명)."
                     )
+                    continue
             else:
-                m.Add(fe >= need_here)
+                short = m.NewIntVar(0, need_here, f"hfloor_{di}_{t}")
+                m.Add(short >= need_here - fe)
+            hard_floor_shortfall.append((short, d_str, t, need_here))
 
     # ---------- 13. 형평 (max-min) ----------
     home_ids = [ei for ei, e in enumerate(EMP) if e["storeId"] == req.storeId]
@@ -751,6 +762,8 @@ def solve(req: SolveRequest) -> SolveResponse:
 
     # ---------- 목적함수 ----------
     obj = []
+    obj += [int(round(w.requireFillShort)) * s for s, _, _, _ in fill_shortfall]
+    obj += [int(round(w.hardFloorShort)) * s for s, _, _, _ in hard_floor_shortfall]
     obj += [int(round(wt * BUCKET)) * g for g, wt in gap_terms]
     obj += [int(round(w.gapDay)) * b for b in day_has_gap]
     obj += [int(round(w.floor * BUCKET)) * s for s in floor_short]
@@ -785,6 +798,19 @@ def solve(req: SolveRequest) -> SolveResponse:
         )
 
     status_label = "OPTIMAL" if status == cp_model.OPTIMAL else "TIMEOUT"
+
+    # 완화 제약(2.5, 12.5)이 실제로 못 채운 만큼을 사람이 읽을 수 있는 문장으로 남긴다.
+    # "완전히 실패" 대신 이렇게 최선을 다한 결과에 어디가 비었는지 알려주는 목적.
+    for short, d_str, label, need in fill_shortfall:
+        val = _val(solver, short)
+        if val > 0:
+            warnings.append(f"{d_str} {label}: 필요 인원 {need}명 중 {val}명을 못 채웠습니다 (인력 부족).")
+    for short, d_str, t, need_here in hard_floor_shortfall:
+        val = _val(solver, short)
+        if val > 0:
+            warnings.append(
+                f"{d_str} {blabel(t)}: 바 인원 최소 {need_here}명 중 {val}명을 못 채웠습니다 (인력 부족)."
+            )
 
     # ---------- 결과 추출 ----------
     board = {req.storeId: {d: {} for d in dates}}
@@ -861,6 +887,8 @@ def solve(req: SolveRequest) -> SolveResponse:
         overtime=sum(int(round(w.overtime)) * _val(solver, ov) for ov in overtime_units.values()),
         weekendExtra=sum(-int(round(wt)) * _val(solver, v) for v, wt in weekend_extra_terms),
         underWeek=sum(int(round(w.underWeek)) * _val(solver, u) for u in under_week.values()),
+        requireFillShort=sum(int(round(w.requireFillShort)) * _val(solver, s) for s, _, _, _ in fill_shortfall),
+        hardFloorShort=sum(int(round(w.hardFloorShort)) * _val(solver, s) for s, _, _, _ in hard_floor_shortfall),
     )
 
     diagnostics = Diagnostics(perDay=per_day, perEmployee=per_emp, penalties=penalties)

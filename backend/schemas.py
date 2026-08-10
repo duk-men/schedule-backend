@@ -106,6 +106,12 @@ class Weights(BaseModel):
     # 상한까지 채우도록 밀어주지 않아서 따로 둔다. over(과잉 인원) 페널티보다 충분히
     # 세게 잡아야, 이미 커버된 시간대에 여유 인력을 더 넣는 걸 주저하지 않는다.
     underWeek: float = 250
+    # "완전히 실패" 대신 "빈 자리 표시하면서 최선을 다한 표"를 위한 완화 페널티.
+    # 인원이 채울 수 있는 만큼은 다른 어떤 항보다도 우선해서 채우게, 다른 모든 항의
+    # 합보다 훨씬 크게 잡는다. requireFillShort(필수 자리) > hardFloorShort(바 인원
+    # 최소치) 순으로, 못 채울 때 어느 쪽을 먼저 포기할지를 정한다.
+    requireFillShort: float = 20000
+    hardFloorShort: float = 8000
 
 
 class SolveRequest(BaseModel):
@@ -148,6 +154,8 @@ class Penalties(BaseModel):
     overtime: float
     weekendExtra: float = 0     # 일>토>금 여유 인력 보상 (음수일수록 그 방향으로 잘 쏠린 것)
     underWeek: float = 0        # 개인 상한을 다 못 채운 채 남는 여력 페널티
+    requireFillShort: float = 0  # 필수 자리(2.5절)를 인력 부족으로 못 채운 만큼
+    hardFloorShort: float = 0    # 바 인원 최소치(12.5절)를 인력 부족으로 못 채운 만큼
 
 
 class Diagnostics(BaseModel):

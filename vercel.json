@@ -1,5 +1,5 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://schedule-backend.onrender.com/api/:path*" }
+    { "source": "/api/:path*", "destination": "https://schedule-backend-y6rk.onrender.com/api/:path*" }
   ]
 }

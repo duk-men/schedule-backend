@@ -91,6 +91,20 @@ def solve(req: SolveRequest) -> SolveResponse:
     # 판정과 3번 제약(같은 시각 출근 그룹 배타)이 이미 이 기준으로 묶여 있는 것과 동일한 정의다.
     EIGHT_K = {key for key, s in SLOTS.items() if not s["night"] and s["frm"] == tb(8)}
 
+    # 같은 frm에 길이가 다른 대체 슬롯이 여럿(half 제외, 예: 찐오 8-18 / 이른오전
+    # 8-15)이면 그중 가장 긴 슬롯을 할 수 있는 사람은 짧은 쪽을 못 하게 한다.
+    # 이른오전 같은 짧은 자리는 avail로 그만큼만 묶인 사람(배정서 등) 전용이다 —
+    # 찐오가 가능한 사람이 굳이 이른오전을 골라 15~18시를 다른 사람에게 떠넘기지 않도록.
+    LONGER_IN_GROUP = {}
+    for frm, keys in frm_groups.items():
+        non_half = [k for k in keys if not SLOTS[k]["half"]]
+        if len(non_half) < 2:
+            continue
+        longest = max(non_half, key=lambda k: SLOTS[k]["to"])
+        for k in non_half:
+            if k != longest:
+                LONGER_IN_GROUP[k] = longest
+
     # ---------- 직원 ----------
     EMP = []
     for e in req.employees:
@@ -134,6 +148,9 @@ def solve(req: SolveRequest) -> SolveResponse:
         if e["until"] and d_str > e["until"]:
             return False
         if (e["id"], d_str) in taken_elsewhere:
+            return False
+        longer = LONGER_IN_GROUP.get(key)
+        if longer and eligible(e, longer, d_str):
             return False
         return True
 

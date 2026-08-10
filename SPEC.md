@@ -434,12 +434,14 @@ v1은 **주 단위 고정**을 권한다. 달 단위는 변수가 4배 이상 �
 
 ### 11.1 테이블
 
-`supabase/schema.sql`을 Supabase SQL Editor에서 한 번 실행하면 만들어진다.
+`supabase/schema.sql`, `supabase/schema_v2_schedule_runs.sql`을 Supabase SQL Editor에서
+순서대로 한 번씩 실행하면 만들어진다.
 
 | 테이블 | 내용 |
 |---|---|
 | `employees` | 직원 한 명당 한 행. `id`는 클라이언트가 `Math.max(기존 id)+1`로 채번(자동증가 아님) |
 | `app_state` | `id='default'` 고정 한 행에 배정표(`board`)·잠금(`lock_map`)·필요인원(`needs`)·빵 시간·인원부족 모드(`shortage`)·서버 계산 휴게(`server_breaks`)를 JSONB로 통째로 저장 |
+| `schedule_runs` | 자동 배정(`runAuto`) 성공할 때마다 한 행 추가(insert-only, 안 지움). 그 시점 직원 설정·규칙·필요인원 스냅샷 + 그 주 결과 + 진단정보. `employees`/`app_state`는 "지금" 상태만 있어서, 나중에 설정이 바뀌면 과거 배정이 왜 그렇게 나왔는지 알 수 없다 — 이 테이블이 그 감사 기록이다 |
 
 두 테이블 다 RLS를 켜두고 `anon` 롤에 전체 권한(`for all using (true)`)을 열어뒀다 —
 로그인이 없으니 URL을 아는 사람은 누구나 읽고 쓸 수 있다는 뜻. 나중에 로그인을 붙이면

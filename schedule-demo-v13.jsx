@@ -1181,6 +1181,31 @@ export default function ScheduleDemo() {
       });
       // 요일을 클릭해야 상세가 보인다는 걸 모르는 사용자를 위해 월요일을 미리 열어 보여준다
       setSelected(weekDates[0]);
+
+      // 이번에 쓴 설정값 + 결과를 스냅샷으로 남긴다 (나중에 직원 설정·규칙이 바뀌어도
+      // "그때 왜 이렇게 나왔는지" 추적할 수 있게). 실패해도 화면 흐름은 막지 않는다.
+      if (supabase) {
+        const weekBoard = {};
+        weekDates.forEach((d) => {
+          weekBoard[d] = res.board?.[storeId]?.[d] || {};
+        });
+        supabase
+          .from("schedule_runs")
+          .insert({
+            store_id: storeId,
+            week_start: weekStart,
+            employees_snapshot: payload.employees,
+            rules_snapshot: payload.rules,
+            needs_snapshot: needs,
+            board_result: weekBoard,
+            status: res.status,
+            warnings: res.warnings || [],
+            diagnostics: res.diagnostics || null,
+          })
+          .then(({ error }) => {
+            if (error) console.error("[supabase] 배정 스냅샷 저장 실패", error);
+          });
+      }
     } catch (e) {
       if (e instanceof SolveError && e.kind === "infeasible") {
         setSolveError([e.message, ...(e.detail || [])].join("\n"));

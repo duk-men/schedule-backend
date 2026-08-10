@@ -143,11 +143,36 @@ function gridRange(year, month) {
    ------------------------------------------------------------------ */
 function buildDemand(peak) {
   const arr = new Array(BPD).fill(0);
+  // from(시작 시각)별로 묶는다. 같은 from에 대체 가능한 슬롯이 여럿(찐오/이른오전/
+  // 오전쩜오 같은 8시 그룹)이면 그중 하나만 그날 실제로 쓰인다(마감만 여러 명이
+  // 같은 시각에 출근 가능 — startShared 참고). 그룹 대표(가장 긴 슬롯, 찐오)의
+  // 전체 길이를 그대로 요구하면, 이른오전이 대신 배정된 날 그 차이 구간이 실제로는
+  // 다음 그룹(짭오 등)이 이미 커버하는데도 "유령 부족"으로 잡힌다. 그래서 대체
+  // 그룹은 그날 필요한 다음 그룹이 시작하는 시점까지만 전용 수요로 잡는다.
+  const groups = {};
   ALL_SLOTS.forEach((s) => {
     if (s.half) return;
-    const n = rawNeed(s, peak);
+    (groups[s.from] = groups[s.from] || []).push(s);
+  });
+  const froms = Object.keys(groups)
+    .map(Number)
+    .sort((a, b) => a - b);
+  froms.forEach((frm, idx) => {
+    const keys = groups[frm];
+    const n = Math.max(...keys.map((s) => rawNeed(s, peak)));
     if (!n) return;
-    for (let i = s.from; i < s.to; i++) arr[i % BPD] += n;
+    let capTo = Math.max(...keys.map((s) => s.to));
+    const activeKeys = keys.filter((s) => !START_SHARED.includes(s.key));
+    if (activeKeys.length >= 2) {
+      for (const laterFrm of froms.slice(idx + 1)) {
+        const laterN = Math.max(...groups[laterFrm].map((s) => rawNeed(s, peak)));
+        if (laterN > 0) {
+          capTo = Math.min(capTo, laterFrm);
+          break;
+        }
+      }
+    }
+    for (let i = frm; i < capTo; i++) arr[i % BPD] += n;
   });
   return arr;
 }

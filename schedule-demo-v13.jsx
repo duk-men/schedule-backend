@@ -270,7 +270,7 @@ const mk = (storeId, name, opt = {}) => ({
   minPerWeek: opt.minPerWeek ?? 0,
   maxWeekday: opt.maxWeekday ?? null, // 평일(비피크)만 따로 거는 상한. null이면 제한 없음
   maxHalf: opt.maxHalf ?? 4,
-  canJjinO: opt.canJjinO ?? true,
+  canEightStart: opt.canEightStart ?? true, // 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
   until: opt.until || null,
   avail: opt.avail || { weekday: null, peak: null },
   fixedDays: opt.fixedDays || [],
@@ -283,13 +283,14 @@ const INITIAL_EMPLOYEES = [
   mk("sinjung", "김규리"),
   mk("sinjung", "김호찬"),
   mk("sinjung", "탁류빈", {
-    canJjinO: false,
+    canEightStart: false,
     until: `${THIS_MONTH}-22`,
     pins: { [`${THIS_MONTH}-22`]: "jjapO" },
   }),
-  mk("sinjung", "나수미", { canJjinO: false }),
+  mk("sinjung", "나수미", { canEightStart: false }),
   mk("sinjung", "배정서", {
-    canJjinO: false,
+    // 찐오는 못 하지만 8-15(이른오전)는 avail로 못박아 그것만 하는 사람이라 예외로 둔다.
+    canEightStart: true,
     minPerWeek: 3,
     maxPerWeek: 4, // 평일+주말 합쳐 최대 4번
     maxWeekday: 3, // 평일만 최대 3번
@@ -299,7 +300,7 @@ const INITIAL_EMPLOYEES = [
   mk("sinjung", "조은솔", {
     kind: "night",
     maxHalf: 0,
-    canJjinO: false,
+    canEightStart: false,
     minPerWeek: 6, // 무조건 주 6일 — 나머지 하루만 타 매장 지원으로 채운다
     maxPerWeek: 6,
   }),
@@ -311,9 +312,9 @@ const INITIAL_EMPLOYEES = [
   mk("songdo", "정민재"),
   mk("songdo", "한지우"),
   mk("songdo", "오세라"),
-  mk("songdo", "윤태경", { canJjinO: false }),
-  mk("songdo", "강백호", { kind: "night", maxHalf: 0, canJjinO: false }),
-  mk("songdo", "신유리", { kind: "night", maxHalf: 0, canJjinO: false }),
+  mk("songdo", "윤태경", { canEightStart: false }),
+  mk("songdo", "강백호", { kind: "night", maxHalf: 0, canEightStart: false }),
+  mk("songdo", "신유리", { kind: "night", maxHalf: 0, canEightStart: false }),
 ];
 
 /* ------------------------------------------------------------------
@@ -487,7 +488,7 @@ function autoAssignAll({
       .filter((e) => (foreign ? e.storeId !== storeId : e.storeId === storeId))
       .filter((e) => (slot.night ? e.kind === "night" : e.kind === "day"))
       .filter((e) => !e.until || date <= e.until)
-      .filter((e) => slot.key !== "jjinO" || e.canJjinO)
+      .filter((e) => slot.from !== tb(8) || slot.night || e.canEightStart)
       .filter((e) => !e.vacations.includes(date))
       .filter((e) => !useSet(date).has(e.id))
       .filter((e) => canWork(e, slot, date))
@@ -525,7 +526,7 @@ function autoAssignAll({
       const slot = slotInfo(key);
       if (needOf(slot, date) + slot.extra - (day[key] || []).length <= 0) continue;
       if (startTaken(day, slot)) continue;
-      if (key === "jjinO" && !e.canJjinO) continue;
+      if (slot.from === tb(8) && !slot.night && !e.canEightStart) continue;
       if (!canWork(e, slot, date)) continue;
       if (clopenBlocked(e.id, date, slot)) continue;
       if (sandwichBlocked(e.id, date, slot)) continue;
@@ -858,7 +859,7 @@ export default function ScheduleDemo() {
       minPerWeek: e.minPerWeek,
       maxWeekday: e.maxWeekday ?? null,
       maxHalf: e.maxHalf,
-      canJjinO: e.canJjinO,
+      canEightStart: e.canEightStart,
       until: e.until || null,
       avail: e.avail || null,
       fixedDays: e.fixedDays || [],
@@ -1291,7 +1292,7 @@ export default function ScheduleDemo() {
       if (isNight ? e.kind !== "night" : e.kind === "night") return false;
       if (!isNight && e.storeId !== storeId) return false;
       if (e.until && date > e.until) return false;
-      if (slotKey === "jjinO" && !e.canJjinO) return false;
+      if (slot.from === tb(8) && !slot.night && !e.canEightStart) return false;
       if (!canWork(e, slot, date)) return false;
       if (busy.has(e.id) || elsewhere.has(e.id)) return false;
       if (e.vacations.includes(date)) return false;
@@ -2283,12 +2284,12 @@ export default function ScheduleDemo() {
 
                   {e.kind === "day" && (
                     <button
-                      onClick={() => patchEmp(e.id, { canJjinO: !e.canJjinO })}
+                      onClick={() => patchEmp(e.id, { canEightStart: !e.canEightStart })}
                       className="mt-3 flex w-full items-center justify-between rounded-md px-3 py-3 active:opacity-60"
-                      style={e.canJjinO ? { background: FILLED, color: PAPER } : { border: `1px solid ${RULE}` }}
+                      style={e.canEightStart ? { background: FILLED, color: PAPER } : { border: `1px solid ${RULE}` }}
                     >
-                      <span className="text-sm font-medium">찐오 가능</span>
-                      <span className="font-mono text-[11px]" style={{ color: e.canJjinO ? PAPER : MUTED }}>
+                      <span className="text-sm font-medium">8시 시작 가능</span>
+                      <span className="font-mono text-[11px]" style={{ color: e.canEightStart ? PAPER : MUTED }}>
                         짭오 {st.jjapO}회 누적
                       </span>
                     </button>

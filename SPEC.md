@@ -116,7 +116,7 @@ server: { proxy: { "/api": "http://localhost:8000" } }
       "maxPerWeek": 5,                  // 출근 횟수 상한
       "minPerWeek": 0,                  // 출근 횟수 하한
       "maxHalf": 4,
-      "canJjinO": true,
+      "canEightStart": true,             // 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
       "until": null,                    // "YYYY-MM-DD" 또는 null
       "avail": { "weekday": null, "peak": [16, 30] },   // [시작버킷, 종료버킷]
       "fixedDays": [1, 3, 6],
@@ -139,7 +139,8 @@ server: { proxy: { "/api": "http://localhost:8000" } }
     "bread":  { "weekday": 32, "peak": 35, "len": 1 },
     "overtime": { "maxExtraShifts": 1, "maxExtraUnits": 2 },
     "shortage": "both",                 // "leave" | "half" | "extra" | "both"
-    "requireSlotFill": false            // 6절 미결정 항목 참고
+    "requireSlotFill": false,           // 6절 미결정 항목 참고
+    "familyStartCap": 3                 // 오전(9/10시)·오후(12/13시) 계열 각각 주당 최대 출근 횟수
   },
 
   "weights": {
@@ -244,6 +245,8 @@ def solve(req: SolveRequest) -> SolveResponse: ...
 | `until` | 종료일 이후 x 변수 미생성 |
 | `startShared` | 요청값으로 8시 그룹 배타 제약 생성 |
 | `shortage` | `"leave"`면 extra·half 슬롯 상한을 0으로 (평일만) |
+| `canEightStart` | false면 8시 시작 슬롯(from이 8시인 슬롯 전부, half 포함) 전체에 대해 x 변수 미생성 |
+| `familyStartCap` | 오전(9/10시 시작)·오후(12/13시 시작) 슬롯을 각각 계열로 묶어 직원별 주당 합을 이 값 이하로 제한 |
 
 ### 6.2 슬롯 그룹 배타 제약의 일반화
 

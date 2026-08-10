@@ -1081,36 +1081,67 @@ export default function ScheduleDemo() {
 
   // 직원 목록이 바뀌면(추가/수정) 잠시 후 통째로 업서트한다. 삭제는 removeEmployee가
   // 즉시 따로 처리한다 — upsert만으로는 빠진 행이 안 지워지기 때문이다.
+  // pendingEmpSaveRef에 "지금 당장 저장" 함수를 넣어둬서, 디바운스가 끝나기 전에
+  // 탭을 벗어나도(아래 flush 효과) 놓치지 않게 한다.
+  const pendingEmpSaveRef = useRef(null);
   const saveEmpTimer = useRef(null);
   useEffect(() => {
     if (!dbLoaded || !supabase) return;
-    clearTimeout(saveEmpTimer.current);
-    saveEmpTimer.current = setTimeout(() => {
+    const doSave = () => {
+      clearTimeout(saveEmpTimer.current);
+      pendingEmpSaveRef.current = null;
       supabase
         .from("employees")
         .upsert(employees.map(empToDb))
         .then(({ error }) => {
           if (error) console.error("[supabase] 직원 저장 실패", error);
         });
-    }, 1000);
+    };
+    pendingEmpSaveRef.current = doSave;
+    clearTimeout(saveEmpTimer.current);
+    saveEmpTimer.current = setTimeout(doSave, 400);
     return () => clearTimeout(saveEmpTimer.current);
   }, [employees, dbLoaded]);
 
-  // 배정표·설정이 바뀌면 잠시 후 app_state 한 행에 통째로 저장한다
+  // 배정표·설정이 바뀌면 잠시 후 app_state 한 행에 통째로 저장한다 (같은 flush 대상)
+  const pendingStateSaveRef = useRef(null);
   const saveStateTimer = useRef(null);
   useEffect(() => {
     if (!dbLoaded || !supabase) return;
-    clearTimeout(saveStateTimer.current);
-    saveStateTimer.current = setTimeout(() => {
+    const doSave = () => {
+      clearTimeout(saveStateTimer.current);
+      pendingStateSaveRef.current = null;
       supabase
         .from("app_state")
         .upsert(appStateToDb({ board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks }))
         .then(({ error }) => {
           if (error) console.error("[supabase] 배정표 저장 실패", error);
         });
-    }, 1000);
+    };
+    pendingStateSaveRef.current = doSave;
+    clearTimeout(saveStateTimer.current);
+    saveStateTimer.current = setTimeout(doSave, 400);
     return () => clearTimeout(saveStateTimer.current);
   }, [board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks, dbLoaded]);
+
+  // 탭을 벗어나거나(새로고침·닫기·다른 탭 전환 포함) 숨겨지는 순간, 디바운스를 기다리던
+  // 저장이 있으면 즉시 실행한다. 이게 없으면 "방금 만든 결과를 보자마자 새로고침"할 때
+  // 저장 전에 페이지가 닫혀 변경이 통째로 날아가는 게 여러 사람이 같이 쓸 때 특히
+  // 눈에 띄는 버그였다.
+  useEffect(() => {
+    const flush = () => {
+      if (document.visibilityState === "hidden") {
+        pendingEmpSaveRef.current?.();
+        pendingStateSaveRef.current?.();
+      }
+    };
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, []);
 
   // 이력 탭: 이 매장·이 주에 대해 과거 자동 배정 스냅샷(schedule_runs)을 불러온다
   const [runs, setRuns] = useState([]);
@@ -1316,25 +1347,26 @@ export default function ScheduleDemo() {
       // 다른 주에 이미 짜둔 스케줄은 건드리지 않는다. 다만 다른 매장 야간 직원을
       // 지원으로 빌려 썼다면 그 매장 쪽 야간 칸에도 반영해서, 나중에 그 매장을
       // 따로 돌릴 때 같은 사람을 이중으로 넣지 않게 한다(주간 근무 칸은 안 건드림).
-      setBoard((prev) => {
-        const nb = { ...prev };
-        const ownNext = { ...(prev[storeId] || {}) };
-        weekDates.forEach((d) => {
-          if (lockedThisWeek.includes(d)) return;
-          ownNext[d] = res.board?.[storeId]?.[d] || {};
-        });
-        nb[storeId] = ownNext;
-        STORES.forEach((s) => {
-          if (s.id === storeId) return;
-          const otherDay = { ...(prev[s.id] || {}) };
-          weekDates.forEach((d) => {
-            const night = res.board?.[s.id]?.[d]?.night;
-            if (night) otherDay[d] = { ...(otherDay[d] || {}), night };
-          });
-          nb[s.id] = otherDay;
-        });
-        return nb;
+      // board/serverBreaks는 지역 변수로도 계산해 아래 즉시 저장에 그대로 쓴다 —
+      // setState 직후엔 React state가 바로 안 바뀌어서 state를 다시 읽으면 안 된다.
+      const nextBoard = { ...board };
+      const ownNext = { ...(board[storeId] || {}) };
+      weekDates.forEach((d) => {
+        if (lockedThisWeek.includes(d)) return;
+        ownNext[d] = res.board?.[storeId]?.[d] || {};
       });
+      nextBoard[storeId] = ownNext;
+      STORES.forEach((s) => {
+        if (s.id === storeId) return;
+        const otherDay = { ...(board[s.id] || {}) };
+        weekDates.forEach((d) => {
+          const night = res.board?.[s.id]?.[d]?.night;
+          if (night) otherDay[d] = { ...(otherDay[d] || {}), night };
+        });
+        nextBoard[s.id] = otherDay;
+      });
+      setBoard(nextBoard);
+
       setAutoMap((prev) => {
         const store = { ...(prev[storeId] || {}) };
         weekDates.forEach((d) => {
@@ -1342,13 +1374,13 @@ export default function ScheduleDemo() {
         });
         return { ...prev, [storeId]: store };
       });
-      setServerBreaks((prev) => {
-        const nb = { ...prev };
-        weekDates.forEach((d) => {
-          if (!lockedThisWeek.includes(d)) nb[d] = res.breaks?.[d] || [];
-        });
-        return nb;
+
+      const nextServerBreaks = { ...serverBreaks };
+      weekDates.forEach((d) => {
+        if (!lockedThisWeek.includes(d)) nextServerBreaks[d] = res.breaks?.[d] || [];
       });
+      setServerBreaks(nextServerBreaks);
+
       setDiagnostics(res.diagnostics || null);
       setSolveMeta({
         status: res.status,
@@ -1359,6 +1391,28 @@ export default function ScheduleDemo() {
       });
       // 요일을 클릭해야 상세가 보인다는 걸 모르는 사용자를 위해 월요일을 미리 열어 보여준다
       setSelected(weekDates[0]);
+
+      // 자동배정 결과는 디바운스(아래 saveStateTimer)를 기다리지 않고 바로 저장한다.
+      // 만들자마자 다른 기기에서 확인하거나 새로고침하는 경우가 많아서, 이 결과가
+      // 가장 자주 저장 전에 사라지기 쉬운 결과였다.
+      if (supabase) {
+        supabase
+          .from("app_state")
+          .upsert(
+            appStateToDb({
+              board: nextBoard,
+              lockMap,
+              needs,
+              breadWeekday,
+              breadPeak,
+              shortage,
+              serverBreaks: nextServerBreaks,
+            })
+          )
+          .then(({ error }) => {
+            if (error) console.error("[supabase] 배정표 저장 실패", error);
+          });
+      }
 
       // 이번에 쓴 설정값 + 결과를 스냅샷으로 남긴다 (나중에 직원 설정·규칙이 바뀌어도
       // "그때 왜 이렇게 나왔는지" 추적할 수 있게). 실패해도 화면 흐름은 막지 않는다.

@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { health, solveWeek, SolveError } from "./src/api.js";
+import { supabase, APP_STATE_ID } from "./src/supabaseClient.js";
 
 /* ------------------------------------------------------------------
    색상 토큰
@@ -360,6 +361,59 @@ const INITIAL_EMPLOYEES = [
   mk("songdo", "강백호", { kind: "night", maxHalf: 0, canEightStart: false }),
   mk("songdo", "신유리", { kind: "night", maxHalf: 0, canEightStart: false }),
 ];
+
+/* ------------------------------------------------------------------
+   DB(Supabase) 직렬화 — 직원 객체 <-> employees 테이블 행
+   ------------------------------------------------------------------ */
+function empToDb(e) {
+  return {
+    id: e.id,
+    store_id: e.storeId,
+    name: e.name,
+    kind: e.kind,
+    max_per_week: e.maxPerWeek,
+    min_per_week: e.minPerWeek,
+    max_weekday: e.maxWeekday,
+    max_half: e.maxHalf,
+    can_eight_start: e.canEightStart,
+    until: e.until,
+    avail: e.avail,
+    fixed_days: e.fixedDays,
+    pins: e.pins,
+    vacations: e.vacations,
+  };
+}
+function empFromDb(r) {
+  return {
+    id: r.id,
+    storeId: r.store_id,
+    name: r.name,
+    kind: r.kind,
+    maxPerWeek: r.max_per_week,
+    minPerWeek: r.min_per_week,
+    maxWeekday: r.max_weekday,
+    maxHalf: r.max_half,
+    canEightStart: r.can_eight_start,
+    until: r.until,
+    avail: r.avail || { weekday: null, peak: null },
+    fixedDays: r.fixed_days || [],
+    pins: r.pins || {},
+    vacations: r.vacations || [],
+  };
+}
+// 배정표·설정 등 나머지 전체 상태는 app_state 테이블 한 행에 통째로 담는다
+function appStateToDb({ board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks }) {
+  return {
+    id: APP_STATE_ID,
+    board,
+    lock_map: lockMap,
+    needs,
+    bread_weekday: breadWeekday,
+    bread_peak: breadPeak,
+    shortage,
+    server_breaks: serverBreaks,
+  };
+}
 
 /* ------------------------------------------------------------------
    자동 배정
@@ -813,6 +867,101 @@ export default function ScheduleDemo() {
     health().then((h) => setServerOk(!!h.ok));
   }, []);
 
+  // ---------------------------------------------------------------
+  // DB(Supabase) 자동 저장/불러오기. 로그인 없는 내부 도구라 브라우저가
+  // anon key로 직접 읽고 쓴다 (SPEC.md "DB" 절 참고).
+  // ---------------------------------------------------------------
+  const [dbLoaded, setDbLoaded] = useState(false);
+  const [dbError, setDbError] = useState(null);
+
+  // 기동 시 1회: 저장된 직원·배정표를 불러온다. 테이블이 비어 있으면(첫 실행)
+  // 지금 코드의 기본값(INITIAL_EMPLOYEES 등)으로 DB를 채운다.
+  useEffect(() => {
+    if (!supabase) {
+      setDbLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [{ data: empRows, error: empErr }, { data: stateRow, error: stateErr }] = await Promise.all([
+          supabase.from("employees").select("*").order("id"),
+          supabase.from("app_state").select("*").eq("id", APP_STATE_ID).maybeSingle(),
+        ]);
+        if (empErr) throw empErr;
+        if (stateErr) throw stateErr;
+        if (cancelled) return;
+
+        if (empRows && empRows.length > 0) {
+          setEmployees(empRows.map(empFromDb));
+        } else {
+          const { error } = await supabase.from("employees").upsert(INITIAL_EMPLOYEES.map(empToDb));
+          if (error) throw error;
+        }
+
+        if (stateRow) {
+          setBoard(stateRow.board || {});
+          setLockMap(stateRow.lock_map || {});
+          if (stateRow.needs && Object.keys(stateRow.needs).length) {
+            applyNeeds(stateRow.needs);
+            setNeeds(stateRow.needs);
+          }
+          if (stateRow.bread_weekday != null) setBreadWeekday(stateRow.bread_weekday);
+          if (stateRow.bread_peak != null) setBreadPeak(stateRow.bread_peak);
+          if (stateRow.shortage) setShortage(stateRow.shortage);
+          setServerBreaks(stateRow.server_breaks || {});
+        } else {
+          const { error } = await supabase
+            .from("app_state")
+            .upsert(appStateToDb({ board: {}, lockMap: {}, needs, breadWeekday, breadPeak, shortage, serverBreaks: {} }));
+          if (error) throw error;
+        }
+      } catch (err) {
+        console.error("[supabase] 초기 로드 실패", err);
+        if (!cancelled) setDbError(err.message || String(err));
+      } finally {
+        if (!cancelled) setDbLoaded(true);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 직원 목록이 바뀌면(추가/수정) 잠시 후 통째로 업서트한다. 삭제는 removeEmployee가
+  // 즉시 따로 처리한다 — upsert만으로는 빠진 행이 안 지워지기 때문이다.
+  const saveEmpTimer = useRef(null);
+  useEffect(() => {
+    if (!dbLoaded || !supabase) return;
+    clearTimeout(saveEmpTimer.current);
+    saveEmpTimer.current = setTimeout(() => {
+      supabase
+        .from("employees")
+        .upsert(employees.map(empToDb))
+        .then(({ error }) => {
+          if (error) console.error("[supabase] 직원 저장 실패", error);
+        });
+    }, 1000);
+    return () => clearTimeout(saveEmpTimer.current);
+  }, [employees, dbLoaded]);
+
+  // 배정표·설정이 바뀌면 잠시 후 app_state 한 행에 통째로 저장한다
+  const saveStateTimer = useRef(null);
+  useEffect(() => {
+    if (!dbLoaded || !supabase) return;
+    clearTimeout(saveStateTimer.current);
+    saveStateTimer.current = setTimeout(() => {
+      supabase
+        .from("app_state")
+        .upsert(appStateToDb({ board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks }))
+        .then(({ error }) => {
+          if (error) console.error("[supabase] 배정표 저장 실패", error);
+        });
+    }, 1000);
+    return () => clearTimeout(saveStateTimer.current);
+  }, [board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks, dbLoaded]);
+
   // 필요 인원을 바꾸면 곡선 캐시를 비우고 다시 계산하게 한다
   function patchNeed(key, kind, value) {
     const next = { ...needs, [key]: { ...needs[key], [kind]: value } };
@@ -1133,7 +1282,12 @@ export default function ScheduleDemo() {
   function addEmployee() {
     const name = prompt("직원 이름");
     if (!name?.trim()) return;
-    setEmployees((prev) => [...prev, mk(storeId, name.trim())]);
+    setEmployees((prev) => {
+      // mk()의 seq는 모듈 로드시 기본 목록 기준이라, DB에서 더 큰 id를 불러온
+      // 뒤에는 현재 목록 기준으로 다시 계산해야 충돌하지 않는다.
+      const nextId = prev.reduce((m, e) => Math.max(m, e.id), 0) + 1;
+      return [...prev, { ...mk(storeId, name.trim()), id: nextId }];
+    });
   }
 
   function removeEmployee(empId) {
@@ -1152,6 +1306,16 @@ export default function ScheduleDemo() {
       return nb;
     });
     setVacFor(null);
+    // upsert만으로는 빠진 행이 안 지워지므로 삭제는 즉시 따로 반영한다
+    if (supabase) {
+      supabase
+        .from("employees")
+        .delete()
+        .eq("id", empId)
+        .then(({ error }) => {
+          if (error) console.error("[supabase] 직원 삭제 실패", error);
+        });
+    }
   }
 
   const hasSchedule = Object.values(assign).some((d) => Object.values(d).some((v) => v.length));
@@ -1516,6 +1680,17 @@ export default function ScheduleDemo() {
       </div>
     </div>
   );
+
+  if (!dbLoaded) {
+    return (
+      <div
+        className="flex min-h-screen w-full items-center justify-center font-sans text-sm"
+        style={{ background: PAPER, color: MUTED }}
+      >
+        불러오는 중…
+      </div>
+    );
+  }
 
   const headTitle =
     view === "week"

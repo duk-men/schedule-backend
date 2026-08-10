@@ -419,8 +419,46 @@ v1은 **주 단위 고정**을 권한다. 달 단위는 변수가 4배 이상 �
 
 ## 10. v1 범위 밖
 
-- 데이터 저장 (DB, 파일, localStorage 전부)
+- ~~데이터 저장 (DB, 파일, localStorage 전부)~~ → 11절에서 Supabase로 추가
 - 사용자 인증, 다중 사용자
 - 배포 (Docker, 리버스 프록시)
 - 달 단위 일괄 배정
 - 실행 취소 / 이력
+
+---
+
+## 11. DB (Supabase)
+
+로그인 기능이 없는 내부 도구라, 브라우저가 Supabase anon key로 테이블을 직접 읽고 쓴다.
+백엔드(FastAPI)는 여전히 무상태 — DB는 프론트에서만 붙는다.
+
+### 11.1 테이블
+
+`supabase/schema.sql`을 Supabase SQL Editor에서 한 번 실행하면 만들어진다.
+
+| 테이블 | 내용 |
+|---|---|
+| `employees` | 직원 한 명당 한 행. `id`는 클라이언트가 `Math.max(기존 id)+1`로 채번(자동증가 아님) |
+| `app_state` | `id='default'` 고정 한 행에 배정표(`board`)·잠금(`lock_map`)·필요인원(`needs`)·빵 시간·인원부족 모드(`shortage`)·서버 계산 휴게(`server_breaks`)를 JSONB로 통째로 저장 |
+
+두 테이블 다 RLS를 켜두고 `anon` 롤에 전체 권한(`for all using (true)`)을 열어뒀다 —
+로그인이 없으니 URL을 아는 사람은 누구나 읽고 쓸 수 있다는 뜻. 나중에 로그인을 붙이면
+이 정책을 좁혀야 한다.
+
+### 11.2 프론트 동작
+
+- 기동 시 1회(`useEffect([])`) `employees`·`app_state`를 불러와 React state를 채운다.
+  `employees`가 비어 있으면(첫 실행) 코드의 `INITIAL_EMPLOYEES`로 시드한다.
+- `employees`, `board`/`lockMap`/`needs`/`breadWeekday`/`breadPeak`/`shortage`/`serverBreaks`가
+  바뀌면 1초 디바운스 후 각각 `employees`/`app_state` 테이블에 upsert한다.
+- 직원 삭제는 upsert로는 반영이 안 되므로(빠진 행이 안 지워짐) `removeEmployee`에서
+  즉시 `delete`를 따로 호출한다.
+- 로드가 끝나기 전(`dbLoaded===false`)엔 "불러오는 중…"만 보여주고, 그 전엔 저장
+  effect를 아예 돌리지 않는다 — 초기 기본값으로 DB를 덮어쓰는 걸 막기 위해서다.
+
+### 11.3 환경변수
+
+`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (Vite라 `VITE_` 접두사 필수, 클라이언트
+번들에 그대로 노출됨 — anon key는 원래 공개돼도 되는 키다). 로컬은 `.env`(git 제외),
+Vercel은 프로젝트 Settings > Environment Variables에 같은 값을 넣어야 배포본에서도 동작한다.
+둘 다 없으면 `src/supabaseClient.js`가 `supabase = null`로 두고 DB 없이(로컬 state만) 동작한다.

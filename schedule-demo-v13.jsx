@@ -326,6 +326,7 @@ const mk = (storeId, name, opt = {}) => ({
   maxWeekday: opt.maxWeekday ?? null, // 평일(비피크)만 따로 거는 상한. null이면 제한 없음
   maxHalf: opt.maxHalf ?? 4,
   canEightStart: opt.canEightStart ?? true, // 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
+  isRookie: opt.isRookie ?? false, // 신입 여부. 신입 둘이 같은 날 오픈조(8시+9시)를 못 나눠 맡음
   until: opt.until || null,
   avail: opt.avail || { weekday: null, peak: null },
   fixedDays: opt.fixedDays || [],
@@ -342,10 +343,11 @@ const INITIAL_EMPLOYEES = [
     until: `${THIS_MONTH}-22`,
     pins: { [`${THIS_MONTH}-22`]: "jjapO" },
   }),
-  mk("sinjung", "나수미", { canEightStart: false }),
+  mk("sinjung", "나수미", { canEightStart: false, isRookie: true }),
   mk("sinjung", "배정서", {
     // 찐오는 못 하지만 8-15(이른오전)는 avail로 못박아 그것만 하는 사람이라 예외로 둔다.
     canEightStart: true,
+    isRookie: true,
     minPerWeek: 3,
     maxPerWeek: 4, // 평일+주말 합쳐 최대 4번
     maxWeekday: 3, // 평일만 최대 3번
@@ -386,6 +388,7 @@ function empToDb(e) {
     max_weekday: e.maxWeekday,
     max_half: e.maxHalf,
     can_eight_start: e.canEightStart,
+    is_rookie: e.isRookie,
     until: e.until,
     avail: e.avail,
     fixed_days: e.fixedDays,
@@ -404,6 +407,7 @@ function empFromDb(r) {
     maxWeekday: r.max_weekday,
     maxHalf: r.max_half,
     canEightStart: r.can_eight_start,
+    isRookie: r.is_rookie || false,
     until: r.until,
     avail: r.avail || { weekday: null, peak: null },
     fixedDays: r.fixed_days || [],
@@ -872,6 +876,11 @@ function SnapshotEmployeeCard({ e }) {
           8시 시작 {e.canEightStart ? "가능" : "불가"}
         </div>
       )}
+      {e.isRookie && (
+        <div className="mt-1 font-mono text-[11px]" style={{ color: GUEST }}>
+          신입
+        </div>
+      )}
 
       <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px]" style={{ color: MUTED }}>
         <div>
@@ -1262,6 +1271,7 @@ export default function ScheduleDemo() {
       maxWeekday: e.maxWeekday ?? null,
       maxHalf: e.maxHalf,
       canEightStart: e.canEightStart,
+      isRookie: e.isRookie,
       until: e.until || null,
       avail: e.avail || null,
       fixedDays: e.fixedDays || [],
@@ -2772,6 +2782,17 @@ export default function ScheduleDemo() {
                       </span>
                     </button>
                   )}
+
+                  <button
+                    onClick={() => patchEmp(e.id, { isRookie: !e.isRookie })}
+                    className="mt-2 flex w-full items-center justify-between rounded-md px-3 py-3 active:opacity-60"
+                    style={e.isRookie ? { background: GUEST, color: PAPER } : { border: `1px solid ${RULE}` }}
+                  >
+                    <span className="text-sm font-medium">신입</span>
+                    <span className="font-mono text-[11px]" style={{ color: e.isRookie ? PAPER : MUTED }}>
+                      신입끼리 오픈조(8시+9시) 동반 금지
+                    </span>
+                  </button>
 
                   {e.kind === "night" && st.guest > 0 && (
                     <div

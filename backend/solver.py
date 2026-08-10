@@ -90,6 +90,8 @@ def solve(req: SolveRequest) -> SolveResponse:
     # 8시에 출근하는 자리 전부 (찐오/이른오전/오전쩜오 등, half 포함). canEightStart 자격
     # 판정과 3번 제약(같은 시각 출근 그룹 배타)이 이미 이 기준으로 묶여 있는 것과 동일한 정의다.
     EIGHT_K = {key for key, s in SLOTS.items() if not s["night"] and s["frm"] == tb(8)}
+    # 9시에 출근하는 자리 (짭오 등). 신입 동반 오픈 금지(3.5절)에 쓴다.
+    NINE_K = {key for key, s in SLOTS.items() if not s["night"] and s["frm"] == tb(9)}
 
     # 같은 frm에 길이가 다른 대체 슬롯이 여럿(half 제외, 예: 찐오 8-18 / 이른오전
     # 8-15)이면 그중 가장 긴 슬롯을 할 수 있는 사람은 짧은 쪽을 못 하게 한다.
@@ -111,7 +113,7 @@ def solve(req: SolveRequest) -> SolveResponse:
         EMP.append(dict(
             id=e.id, name=e.name, storeId=e.storeId, kind=e.kind,
             maxw=e.maxPerWeek, minw=e.minPerWeek, maxweekday=e.maxWeekday, maxhalf=e.maxHalf,
-            eightstart=e.canEightStart, until=e.until, avail=e.avail,
+            eightstart=e.canEightStart, rookie=e.isRookie, until=e.until, avail=e.avail,
             fixed=set(e.fixedDays), pins=e.pins, vacations=set(e.vacations),
         ))
     E = len(EMP)
@@ -278,6 +280,32 @@ def solve(req: SolveRequest) -> SolveResponse:
                     m.Add(u == 0)
                 used.append(u)
             m.Add(sum(used) <= 1)
+
+    # ---------- 3.5 신입 동반 오픈 금지 ----------
+    # 신입 두 명이 같은 날 오픈조(8시 자리 + 9시 자리)를 나눠 맡는 것도 금지한다
+    # (예: 배정서 8-15 + 나수미 9-19 같은 날). 신입 혼자 8시나 9시를 서는 건
+    # 상관없다 — 신입끼리 오픈조를 통째로 맡는 조합만 막는다. 잠긴 날짜는 이미
+    # 확정된 배치라 손댈 수 없어 건너뛴다.
+    ROOKIE_IDS = {e["id"] for e in EMP if e["rookie"]}
+    if ROOKIE_IDS:
+        for di, d_str in enumerate(dates):
+            if d_str in locked_set:
+                continue
+            r8_terms = [
+                X(ei, di, k) for ei, e in enumerate(EMP) if e["id"] in ROOKIE_IDS
+                for k in EIGHT_K if X(ei, di, k) is not None
+            ]
+            r9_terms = [
+                X(ei, di, k) for ei, e in enumerate(EMP) if e["id"] in ROOKIE_IDS
+                for k in NINE_K if X(ei, di, k) is not None
+            ]
+            if not r8_terms or not r9_terms:
+                continue
+            r8 = m.NewBoolVar(f"rookie8_{di}")
+            m.AddMaxEquality(r8, r8_terms)
+            r9 = m.NewBoolVar(f"rookie9_{di}")
+            m.AddMaxEquality(r9, r9_terms)
+            m.Add(r8 + r9 <= 1)
 
     # ---------- 4. 주 근무 상한 (버그1 수정: 출근 횟수와 근무일수를 분리 집계) ----------
     def unit(key):

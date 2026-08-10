@@ -19,6 +19,7 @@ class Employee(BaseModel):
     maxWeekday: Optional[int] = None  # 평일(비피크)만 따로 거는 상한. None이면 제한 없음
     maxHalf: int = 0
     canEightStart: bool = False  # 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
+    isRookie: bool = False  # 신입 여부. 신입 둘이 같은 날 오픈조(8시+9시)를 동반하면 안 됨
     until: Optional[str] = None
     avail: Optional[Avail] = None
     fixedDays: List[int] = Field(default_factory=list)

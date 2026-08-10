@@ -1,0 +1,2426 @@
+import { useState, useMemo, useCallback } from "react";
+
+/* ------------------------------------------------------------------
+   색상 토큰
+   ------------------------------------------------------------------ */
+const INK = "#16202B";
+const PAPER = "#F1F0EC";
+const CARD = "#FBFAF7";
+const RULE = "#D8D5CC";
+const MUTED = "#6E7480";
+const MARK = "#E9E44B";
+const ALERT = "#B4472C";
+const EMPTY = "#DEDCD4";
+const FILLED = "#2F6F5E";
+const GUEST = "#8A6A2F";
+const TIGHT = "#C08A2E";
+
+/* ------------------------------------------------------------------
+   시간축. 하루를 30분 단위 48칸으로 쪼갠다
+   ------------------------------------------------------------------ */
+const BUCKET = 30;
+const BPD = (24 * 60) / BUCKET;
+const tb = (h, m = 0) => (h * 60 + m) / BUCKET;
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+const bucketLabel = (i) => {
+  const mins = i * BUCKET;
+  return `${pad2(Math.floor(mins / 60) % 24)}:${pad2(mins % 60)}`;
+};
+// 표에 넣는 축약 표기. 8-18 처럼 시 단위로만 적는다
+const rangeLabel = (s) =>
+  `${Math.floor((s.from * BUCKET) / 60) % 24}-${Math.floor((s.to * BUCKET) / 60) % 24}`;
+
+/* ------------------------------------------------------------------
+   근무타입
+   ------------------------------------------------------------------ */
+const SHIFTS = [
+  { key: "jjinO", label: "찐오", from: tb(8), to: tb(18), need: 1, extra: 0, open: true, color: "#2F6F5E" },
+  { key: "earlyShort", label: "이른오전", from: tb(8), to: tb(15), need: 0, extra: 1, open: true, color: "#4A7C6F" },
+  { key: "jjapO", label: "짭오", from: tb(9), to: tb(19), need: 0, peak: 1, extra: 1, open: true, color: "#3D5A98" },
+  { key: "close", label: "마감", from: tb(12), to: tb(22), need: 1, peak: 2, extra: 0, late: true, color: "#B4472C" },
+  { key: "thirteen", label: "13", from: tb(13), to: tb(23), need: 1, extra: 0, late: true, color: "#6B4A7A" },
+  { key: "middle", label: "미들", from: tb(10), to: tb(20), need: 0, extra: 1, open: true, color: "#8A6A2F" },
+  { key: "night", label: "야간", from: tb(22), to: tb(32), need: 1, extra: 0, night: true, color: "#16202B" },
+];
+
+const HALF = [
+  { key: "halfAm", label: "오전쩜오", from: tb(8), to: tb(14), open: true, half: true, color: "#7A8290" },
+  { key: "halfPm", label: "마감쩜오", from: tb(16), to: tb(22), late: true, half: true, color: "#7A8290" },
+];
+
+const ALL_SLOTS = [...SHIFTS, ...HALF].map((s) => ({ ...s, short: rangeLabel(s) }));
+const slotInfo = (key) => ALL_SLOTS.find((s) => s.key === key);
+const timeText = (s) => `${bucketLabel(s.from)}–${bucketLabel(s.to)}`;
+
+// 마감만 여러 명이 같은 시각에 출근할 수 있다
+const START_SHARED = ["close"];
+function startTaken(day, slot) {
+  if (START_SHARED.includes(slot.key)) return false;
+  return ALL_SLOTS.some(
+    (s) =>
+      s.key !== slot.key &&
+      s.from === slot.from &&
+      !START_SHARED.includes(s.key) &&
+      (day[s.key] || []).length > 0
+  );
+}
+
+const WEEK_CAP = 6; // 어떤 경우에도 주 6일을 넘길 수 없다
+const AUTO_TRIES = 300; // 자동 배정 시 여러 시드로 시도해 보고 가장 점수 낮은 걸 고른다
+const AUTO_CHUNK = 10; // 한 틱에 처리할 시도 수. 이 단위로 쪼개서 화면이 안 멈추게 한다
+const FILL_ORDER = ["jjinO", "jjapO", "close", "thirteen", "earlyShort", "middle"];
+const EXTRA_ORDER = ["jjapO", "earlyShort", "middle"];
+
+/* ------------------------------------------------------------------
+   날짜 유틸
+   ------------------------------------------------------------------ */
+const pad = (n) => String(n).padStart(2, "0");
+const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parse = (s) => new Date(s + "T00:00:00");
+const WD = ["월", "화", "수", "목", "금", "토", "일"];
+const wdIndex = (d) => (d.getDay() + 6) % 7;
+
+const isPeak = (dateStr) => wdIndex(parse(dateStr)) >= 4;
+// 규칙 탭에서 바꾼 값을 담아 둔다. 없으면 슬롯 기본값을 쓴다
+let NEED_OVERRIDE = {};
+let DEMAND_CACHE = {};
+function applyNeeds(next) {
+  NEED_OVERRIDE = next;
+  DEMAND_CACHE = {};
+}
+const rawNeed = (slot, peak) => {
+  const o = NEED_OVERRIDE[slot.key];
+  if (o) return peak ? o.peak : o.weekday;
+  return peak && slot.peak != null ? slot.peak : slot.need;
+};
+const needOf = (slot, dateStr) => rawNeed(slot, isPeak(dateStr));
+
+function canWork(e, slot, dateStr) {
+  const win = isPeak(dateStr) ? e.avail?.peak : e.avail?.weekday;
+  if (!win) return true;
+  return slot.from >= win[0] && slot.to <= win[1];
+}
+
+function weekKey(dateStr) {
+  const d = parse(dateStr);
+  d.setDate(d.getDate() - wdIndex(d));
+  return fmt(d);
+}
+
+function monthDates(year, month) {
+  const last = new Date(year, month, 0).getDate();
+  return Array.from({ length: last }, (_, i) => `${year}-${pad(month)}-${pad(i + 1)}`);
+}
+
+const shiftDate = (dateStr, diff) => {
+  const d = parse(dateStr);
+  d.setDate(d.getDate() + diff);
+  return fmt(d);
+};
+
+// 달 앞뒤로 걸친 주까지 포함한 날짜 목록. 배정은 이 범위로 돌린다
+function gridRange(year, month) {
+  const md = monthDates(year, month);
+  const out = [];
+  let cur = weekKey(md[0]);
+  const last = shiftDate(weekKey(md[md.length - 1]), 6);
+  while (cur <= last) {
+    out.push(cur);
+    cur = shiftDate(cur, 1);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------
+   필요 인원 곡선
+   ------------------------------------------------------------------ */
+function buildDemand(peak) {
+  const arr = new Array(BPD).fill(0);
+  ALL_SLOTS.forEach((s) => {
+    if (s.half) return;
+    const n = rawNeed(s, peak);
+    if (!n) return;
+    for (let i = s.from; i < s.to; i++) arr[i % BPD] += n;
+  });
+  return arr;
+}
+function demandFor(dateStr) {
+  const k = isPeak(dateStr) ? "p" : "w";
+  if (!DEMAND_CACHE[k]) DEMAND_CACHE[k] = buildDemand(k === "p");
+  return DEMAND_CACHE[k];
+}
+
+/* ------------------------------------------------------------------
+   휴게와 바 인원 기준
+   ------------------------------------------------------------------ */
+const BREAK_LEN = tb(1);
+const OPEN_BREAK_AT = tb(12, 30);
+const LATE_BREAK_AT = tb(15, 30);
+const BREAD_LEN = tb(0, 30);
+const FLOOR_FROM = tb(11); // 개점 직후는 한가하므로 이때부터 본다
+const FLOOR_UNTIL = tb(17);
+const FLOOR_MIN = 2;
+const FLOOR_OK = 3;
+const MAX_FLOOR = 3; // 평일 필수 최댓값과 같은, 동시 근무 최적 상한
+
+function coverage(day, prevDay) {
+  const arr = new Array(BPD).fill(0);
+  const add = (from, to) => {
+    for (let i = from; i < to; i++) if (i < BPD) arr[i] += 1;
+  };
+  Object.entries(day || {}).forEach(([key, ids]) => {
+    const s = slotInfo(key);
+    if (!s) return;
+    ids.forEach(() => add(s.from, Math.min(s.to, BPD)));
+  });
+  const nightSlot = slotInfo("night");
+  (prevDay?.night || []).forEach(() => add(0, nightSlot.to - BPD));
+  return arr;
+}
+
+const gapOf = (cov, dateStr) => demandFor(dateStr).map((n, i) => Math.max(0, n - cov[i]));
+const gapMinutes = (gap) => gap.reduce((a, b) => a + b, 0) * BUCKET;
+
+function gapCut(slot, gap) {
+  let n = 0;
+  for (let i = slot.from; i < Math.min(slot.to, BPD); i++) if (gap[i] > 0) n += 1;
+  return n;
+}
+
+function breakPlan(day) {
+  const collect = (pred) =>
+    ALL_SLOTS.filter(pred)
+      .flatMap((s) => (day[s.key] || []).map((id) => ({ id, slot: s })))
+      .sort((a, b) => a.slot.from - b.slot.from);
+
+  // 쩜오는 6시간 근무라 휴게를 돌지 않는다
+  const openers = collect((s) => s.open && !s.half);
+  const closers = collect((s) => s.late && !s.half);
+
+  const rows = [];
+  let t = OPEN_BREAK_AT;
+  openers.forEach(({ id, slot }) => {
+    const from = Math.min(t, slot.to - BREAK_LEN);
+    rows.push({ empId: id, slotKey: slot.key, from, to: from + BREAK_LEN });
+    t += BREAK_LEN;
+  });
+  t = Math.max(LATE_BREAK_AT, t);
+  closers.forEach(({ id, slot }) => {
+    const from = Math.min(t, slot.to - BREAK_LEN);
+    rows.push({ empId: id, slotKey: slot.key, from, to: from + BREAK_LEN });
+    t += BREAK_LEN;
+  });
+  return rows;
+}
+
+// 휴게·빵으로 빠지기 전, 그 시간에 출근해 있는 인원(야간 제외)
+function staffOnFloor(day) {
+  const arr = new Array(BPD).fill(0);
+  Object.entries(day || {}).forEach(([key, ids]) => {
+    const s = slotInfo(key);
+    if (!s || s.night) return;
+    ids.forEach(() => {
+      for (let i = s.from; i < Math.min(s.to, BPD); i++) arr[i] += 1;
+    });
+  });
+  return arr;
+}
+
+function floorCurve(day, breaks, breadAt) {
+  const arr = staffOnFloor(day);
+  breaks.forEach((b) => {
+    for (let i = b.from; i < Math.min(b.to, BPD); i++) arr[i] -= 1;
+  });
+  for (let i = breadAt; i < Math.min(breadAt + BREAD_LEN, BPD); i++) arr[i] -= 1;
+  return arr;
+}
+
+function floorGap(floor) {
+  return floor.map((n, i) =>
+    i >= FLOOR_FROM && i < FLOOR_UNTIL ? Math.max(0, FLOOR_MIN - n) : 0
+  );
+}
+
+/* ------------------------------------------------------------------
+   초기 데이터
+   ------------------------------------------------------------------ */
+const STORES = [
+  { id: "sinjung", name: "신중동점" },
+  { id: "songdo", name: "송도점 (샘플)" },
+];
+const storeName = (id) => STORES.find((s) => s.id === id)?.name || id;
+
+const NOW = new Date();
+const THIS_MONTH = `${NOW.getFullYear()}-${pad(NOW.getMonth() + 1)}`;
+
+let seq = 0;
+const mk = (storeId, name, opt = {}) => ({
+  id: ++seq,
+  storeId,
+  name,
+  kind: opt.kind || "day",
+  maxPerWeek: opt.maxPerWeek ?? 5,
+  minPerWeek: opt.minPerWeek ?? 0,
+  maxHalf: opt.maxHalf ?? 4,
+  canJjinO: opt.canJjinO ?? true,
+  until: opt.until || null,
+  avail: opt.avail || { weekday: null, peak: null },
+  fixedDays: opt.fixedDays || [],
+  pins: opt.pins || {},
+  vacations: [],
+});
+
+const INITIAL_EMPLOYEES = [
+  mk("sinjung", "김선우", { fixedDays: [1, 3, 6] }), // 화, 목, 일 발주
+  mk("sinjung", "김규리"),
+  mk("sinjung", "김호찬"),
+  mk("sinjung", "탁류빈", {
+    canJjinO: false,
+    until: `${THIS_MONTH}-22`,
+    pins: { [`${THIS_MONTH}-22`]: "jjapO" },
+  }),
+  mk("sinjung", "나수미", { canJjinO: false }),
+  mk("sinjung", "배정서", {
+    canJjinO: false,
+    minPerWeek: 3,
+    maxPerWeek: 4,
+    avail: { weekday: [tb(8), tb(15)], peak: [tb(8), tb(15)] },
+  }),
+  mk("sinjung", "조은솔", { kind: "night", maxHalf: 0, canJjinO: false }),
+
+  mk("songdo", "김서준"),
+  mk("songdo", "이하윤"),
+  mk("songdo", "박도현"),
+  mk("songdo", "최수아", { maxPerWeek: 4, maxHalf: 2 }),
+  mk("songdo", "정민재"),
+  mk("songdo", "한지우"),
+  mk("songdo", "오세라"),
+  mk("songdo", "윤태경", { canJjinO: false }),
+  mk("songdo", "강백호", { kind: "night", maxHalf: 0, canJjinO: false }),
+  mk("songdo", "신유리", { kind: "night", maxHalf: 0, canJjinO: false }),
+];
+
+/* ------------------------------------------------------------------
+   자동 배정
+   ------------------------------------------------------------------ */
+// 같은 조건이면 늘 같은 답이 나오지 않도록 시드를 쓴다
+function mulberry32(a) {
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function autoAssignAll({
+  dates,
+  employees,
+  prevBoard,
+  lockMap,
+  shortage,
+  breadWeekday,
+  breadPeak,
+  seed = 1,
+}) {
+  const rng = mulberry32(seed);
+  const jitter = {};
+  const jOf = (id, date) => {
+    const k = `${id}|${date}`;
+    if (jitter[k] === undefined) jitter[k] = rng();
+    return jitter[k];
+  };
+  const board = {};
+  STORES.forEach((s) => (board[s.id] = {}));
+
+  const weekCount = {};
+  const total = {};
+  const halfCount = {};
+  const cloCount = {};
+  const busyOn = {};
+
+  const breadAtOf = (date) => (isPeak(date) ? breadPeak : breadWeekday);
+  const useSet = (date) => (busyOn[date] = busyOn[date] || new Set());
+  const wcOf = (id, date) => weekCount[`${id}|${weekKey(date)}`] || 0;
+  const bump = (id, date, isHalf) => {
+    const k = `${id}|${weekKey(date)}`;
+    weekCount[k] = (weekCount[k] || 0) + (isHalf ? 0.5 : 1);
+    total[id] = (total[id] || 0) + (isHalf ? 0.5 : 1);
+    if (isHalf) halfCount[id] = (halfCount[id] || 0) + 1;
+  };
+
+  const slotsOn = (empId, date) => {
+    const keys = [];
+    STORES.forEach((s) => {
+      Object.entries(board[s.id][date] || {}).forEach(([k, ids]) => {
+        if (ids.includes(empId)) keys.push(k);
+      });
+    });
+    return keys;
+  };
+  const isLateOn = (id, date) => slotsOn(id, date).some((k) => slotInfo(k).late);
+  const isOpenOn = (id, date) => slotsOn(id, date).some((k) => slotInfo(k).open);
+
+  // 마감 다음날 오픈이 성립하면 그 주 식별자를 돌려준다
+  const clopenWeek = (id, date, slot) => {
+    if (slot.open && isLateOn(id, shiftDate(date, -1))) return weekKey(date);
+    if (slot.late && isOpenOn(id, shiftDate(date, 1))) return weekKey(shiftDate(date, 1));
+    return null;
+  };
+  const clopenBlocked = (id, date, slot) => {
+    const wk = clopenWeek(id, date, slot);
+    return wk ? (cloCount[`${id}|${wk}`] || 0) >= 1 : false;
+  };
+
+  // 마감 - 오픈 - 마감 3일 패턴은 아예 만들지 않는다
+  const sandwichBlocked = (id, date, slot) => {
+    if (slot.late) {
+      if (isOpenOn(id, shiftDate(date, -1)) && isLateOn(id, shiftDate(date, -2))) return true;
+      if (isOpenOn(id, shiftDate(date, 1)) && isLateOn(id, shiftDate(date, 2))) return true;
+    }
+    if (slot.open) {
+      if (isLateOn(id, shiftDate(date, -1)) && isLateOn(id, shiftDate(date, 1))) return true;
+    }
+    return false;
+  };
+
+  STORES.forEach((s) => {
+    dates.forEach((date) => {
+      if (!(lockMap[s.id] || {})[date]) return;
+      const day = (prevBoard[s.id] || {})[date] || {};
+      board[s.id][date] = day;
+      Object.entries(day).forEach(([slot, ids]) =>
+        ids.forEach((id) => {
+          bump(id, date, slot.startsWith("half"));
+          useSet(date).add(id);
+        })
+      );
+    });
+  });
+
+  // 주 안에서 뒤로 밀리는 요일이 매번 목요일로 고정되지 않도록 섞는다
+  const shuffle = (arr) => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+
+  // 주 단위로 묶고 금토일을 앞으로 보낸다. 인력이 빠듯한 주는 그룹 안 순서에 따라
+  // 어느 요일이 뒤로 밀릴지가 갈리므로, 시드마다 그 순서를 바꿔가며 시도해 본다.
+  const weeks = {};
+  dates.forEach((d) => {
+    const k = weekKey(d);
+    (weeks[k] = weeks[k] || []).push(d);
+  });
+  const ordered = [];
+  Object.keys(weeks)
+    .sort()
+    .forEach((k) => {
+      const ds = weeks[k];
+      ordered.push(...shuffle(ds.filter(isPeak)), ...shuffle(ds.filter((d) => !isPeak(d))));
+    });
+
+  // 그 주에 필수 자리를 다 채우고도 인력이 남는지 미리 본다
+  const weekSlack = {};
+  const weekBuckets = {};
+  dates.forEach((d) => {
+    const k = weekKey(d);
+    (weekBuckets[k] = weekBuckets[k] || []).push(d);
+  });
+  STORES.forEach((store) => {
+    Object.entries(weekBuckets).forEach(([wk, ds]) => {
+      let demand = 0;
+      ds.forEach((d) =>
+        ALL_SLOTS.forEach((s) => {
+          if (s.half || s.night) return;
+          demand += needOf(s, d);
+        })
+      );
+      const supply = employees
+        .filter((e) => e.storeId === store.id && e.kind === "day")
+        .reduce((a, e) => {
+          const usable = ds.filter(
+            (d) => !e.vacations.includes(d) && (!e.until || d <= e.until)
+          ).length;
+          return a + Math.min(e.maxPerWeek, WEEK_CAP, usable);
+        }, 0);
+      weekSlack[`${store.id}|${wk}`] = supply - demand;
+    });
+  });
+
+  const pool = (storeId, slot, date, { capBonus = 0, foreign = false } = {}) => {
+    if (startTaken(board[storeId][date] || {}, slot)) return [];
+    // 쩜오는 0.5일이므로 넣은 뒤 값이 상한을 넘지 않는지로 판단한다
+    const unit = slot.half ? 0.5 : 1;
+    return employees
+      .filter((e) => (foreign ? e.storeId !== storeId : e.storeId === storeId))
+      .filter((e) => (slot.night ? e.kind === "night" : e.kind === "day"))
+      .filter((e) => !e.until || date <= e.until)
+      .filter((e) => slot.key !== "jjinO" || e.canJjinO)
+      .filter((e) => !e.vacations.includes(date))
+      .filter((e) => !useSet(date).has(e.id))
+      .filter((e) => canWork(e, slot, date))
+      .filter((e) => !clopenBlocked(e.id, date, slot))
+      .filter((e) => !sandwichBlocked(e.id, date, slot))
+      // 개인 상한과 전체 상한 중 낮은 쪽을 쓴다
+      .filter((e) => wcOf(e.id, date) + unit <= Math.min(e.maxPerWeek + capBonus, WEEK_CAP))
+      .sort((a, b) => {
+        const am = wcOf(a.id, date) < a.minPerWeek ? 0 : 1;
+        const bm = wcOf(b.id, date) < b.minPerWeek ? 0 : 1;
+        if (am !== bm) return am - bm;
+        const dt = (total[a.id] || 0) - (total[b.id] || 0);
+        if (dt !== 0) return dt;
+        const dw = wcOf(a.id, date) - wcOf(b.id, date);
+        if (dw !== 0) return dw;
+        return jOf(a.id, date) - jOf(b.id, date);
+      });
+  };
+
+  const place = (storeId, date, key, list, isHalf = false) => {
+    const slot = slotInfo(key);
+    const day = (board[storeId][date] = board[storeId][date] || {});
+    list.forEach((e) => {
+      const wk = clopenWeek(e.id, date, slot);
+      if (wk) cloCount[`${e.id}|${wk}`] = (cloCount[`${e.id}|${wk}`] || 0) + 1;
+      useSet(date).add(e.id);
+      bump(e.id, date, isHalf);
+    });
+    day[key] = [...(day[key] || []), ...list.map((e) => e.id)];
+  };
+
+  const placeAnywhere = (storeId, date, day, e) => {
+    if (wcOf(e.id, date) + 1 > Math.min(e.maxPerWeek, WEEK_CAP)) return false;
+    for (const key of FILL_ORDER) {
+      const slot = slotInfo(key);
+      if (needOf(slot, date) + slot.extra - (day[key] || []).length <= 0) continue;
+      if (startTaken(day, slot)) continue;
+      if (key === "jjinO" && !e.canJjinO) continue;
+      if (!canWork(e, slot, date)) continue;
+      if (clopenBlocked(e.id, date, slot)) continue;
+      if (sandwichBlocked(e.id, date, slot)) continue;
+      place(storeId, date, key, [e]);
+      return true;
+    }
+    return false;
+  };
+
+  const combinedGap = (day, prevDayObj, date) => {
+    const g1 = gapOf(coverage(day, prevDayObj), date);
+    const g2 = floorGap(floorCurve(day, breakPlan(day), breadAtOf(date)));
+    return g1.map((v, i) => Math.max(v, g2[i]));
+  };
+
+  // 이미 충분한 시간대만 더 채우려는 건지(순수 패딩) 판단한다.
+  // 상한은 MAX_FLOOR와 실제 필요 인원 중 큰 쪽이라 금토일 필수 커버리지는 막지 않는다.
+  const overCap = (day, date, slot) => {
+    const floor = floorCurve(day, breakPlan(day), breadAtOf(date));
+    const demand = demandFor(date);
+    for (let i = slot.from; i < Math.min(slot.to, BPD); i++) {
+      const ceil = Math.max(MAX_FLOOR, demand[i] || 0);
+      if (floor[i] < ceil) return false;
+    }
+    return true;
+  };
+
+  const isLocked = (storeId, date) => !!(lockMap[storeId] || {})[date];
+
+  for (const date of ordered) {
+    const nightSlot = slotInfo("night");
+
+    // 1단계: 모든 매장 야간부터. 자기 매장 → 주6일 → 타 매장 지원
+    for (const store of STORES) {
+      if (isLocked(store.id, date)) continue;
+      board[store.id][date] = board[store.id][date] || {};
+      let want = needOf(nightSlot, date) - (board[store.id][date].night || []).length;
+      if (want <= 0) continue;
+      const attempts = [
+        { capBonus: 0, foreign: false },
+        { capBonus: 1, foreign: false },
+        { capBonus: 0, foreign: true },
+        { capBonus: 1, foreign: true },
+      ];
+      for (const opt of attempts) {
+        if (want <= 0) break;
+        const picks = pool(store.id, nightSlot, date, opt).slice(0, want);
+        if (picks.length === 0) continue;
+        place(store.id, date, "night", picks);
+        want -= picks.length;
+      }
+    }
+
+    // 2단계: 매장별 주간 배정
+    for (const store of STORES) {
+      if (isLocked(store.id, date)) continue;
+      const day = (board[store.id][date] = board[store.id][date] || {});
+      const prevDayObj = board[store.id][shiftDate(date, -1)] || {};
+      const wd = wdIndex(parse(date));
+
+      const dayStaff = (extra = () => true) =>
+        employees
+          .filter((e) => e.storeId === store.id && e.kind === "day")
+          .filter((e) => !e.until || date <= e.until)
+          .filter((e) => !e.vacations.includes(date))
+          .filter((e) => !useSet(date).has(e.id))
+          .filter(extra);
+
+      // 못박은 근무가 가장 먼저
+      employees
+        .filter((e) => e.storeId === store.id && e.pins?.[date])
+        .filter((e) => !e.vacations.includes(date))
+        .filter((e) => !useSet(date).has(e.id))
+        .forEach((e) => place(store.id, date, e.pins[date], [e]));
+
+      // 고정 근무 요일
+      dayStaff((e) => (e.fixedDays || []).includes(wd)).forEach((e) =>
+        placeAnywhere(store.id, date, day, e)
+      );
+
+      // 주 최소 근무일이 걸린 사람은 자리 경쟁에서 밀리기 쉬워 먼저 넣는다
+      dayStaff((e) => e.minPerWeek > 0 && wcOf(e.id, date) < e.minPerWeek)
+        .sort((a, b) => (total[a.id] || 0) - (total[b.id] || 0))
+        .forEach((e) => placeAnywhere(store.id, date, day, e));
+
+      // 필수 인원
+      for (const key of FILL_ORDER) {
+        const slot = slotInfo(key);
+        const want = needOf(slot, date) - (day[key] || []).length;
+        if (want <= 0) continue;
+        place(store.id, date, key, pool(store.id, slot, date).slice(0, want));
+      }
+
+      // 여유분. 그 주에 인력이 남고, 실제로 그 시간대가 부족할 때만 쓴다
+      if ((weekSlack[`${store.id}|${weekKey(date)}`] || 0) > 0) {
+        for (const key of EXTRA_ORDER) {
+          const slot = slotInfo(key);
+          if (!slot.extra) continue;
+          const room = needOf(slot, date) + slot.extra - (day[key] || []).length;
+          if (room <= 0) continue;
+          if (gapCut(slot, combinedGap(day, prevDayObj, date)) < 1) continue;
+          if (overCap(day, date, slot)) continue;
+          place(store.id, date, key, pool(store.id, slot, date).slice(0, room));
+        }
+      }
+
+      // 금토일은 비면 안 되므로 설정과 무관하게 총동원
+      const mode = isPeak(date) ? "both" : shortage;
+      if (mode === "leave") continue;
+      const useHalf = mode === "half" || mode === "both";
+      const useExtra = mode === "extra" || mode === "both";
+
+      if (useHalf) {
+        for (let round = 0; round < 4; round++) {
+          const gap = combinedGap(day, prevDayObj, date);
+          if (gapMinutes(gap) === 0) break;
+          const ranked = HALF.map((h) => ({ h: slotInfo(h.key), cut: gapCut(slotInfo(h.key), gap) }))
+            .filter((r) => r.cut > 0 && !overCap(day, date, r.h))
+            .sort((a, b) => b.cut - a.cut);
+          if (ranked.length === 0) break;
+
+          let placed = false;
+          for (const { h } of ranked) {
+            const pick = pool(store.id, h, date, { capBonus: 1 }).find(
+              (e) => (halfCount[e.id] || 0) < e.maxHalf
+            );
+            if (!pick) continue;
+            place(store.id, date, h.key, [pick], true);
+            placed = true;
+            break;
+          }
+          if (!placed) break;
+        }
+      }
+
+      if (useExtra) {
+        for (const key of FILL_ORDER) {
+          const slot = slotInfo(key);
+          const room = needOf(slot, date) + slot.extra - (day[key] || []).length;
+          if (room <= 0) continue;
+          // 30분짜리 구멍 하나 때문에 사람을 통째로 넣지는 않는다
+          if (gapCut(slot, combinedGap(day, prevDayObj, date)) < 2) continue;
+          if (overCap(day, date, slot)) continue;
+          place(store.id, date, key, pool(store.id, slot, date, { capBonus: 1 }).slice(0, 1));
+        }
+      }
+    }
+  }
+
+  return board;
+}
+
+/* ------------------------------------------------------------------
+   결과 채점. 값이 낮을수록 좋은 근무표
+   ------------------------------------------------------------------ */
+function scoreBoard(board, dates, employees, breadWeekday, breadPeak) {
+  let penalty = 0;
+  const perEmp = {};
+
+  STORES.forEach((st) =>
+    dates.forEach((d) => {
+      const day = board[st.id][d] || {};
+      const prev = board[st.id][shiftDate(d, -1)] || {};
+      // 금토일 결손은 훨씬 무겁게 본다
+      penalty += gapMinutes(gapOf(coverage(day, prev), d)) * (isPeak(d) ? 4 : 1);
+      const floor = floorCurve(day, breakPlan(day), isPeak(d) ? breadPeak : breadWeekday);
+      penalty += gapMinutes(floorGap(floor)) * 2;
+      // 필요 이상으로 사람이 몰리는 시간대도 감점 (적은 인원을 효율적으로 쓰기 위함)
+      const demand = demandFor(d);
+      floor.forEach((n, i) => {
+        const ceil = Math.max(MAX_FLOOR, demand[i] || 0);
+        if (n > ceil) penalty += (n - ceil) * BUCKET * 1.5;
+      });
+      Object.entries(day).forEach(([slot, ids]) =>
+        ids.forEach((id) => {
+          perEmp[id] = (perEmp[id] || 0) + (slot.startsWith("half") ? 0.5 : 1);
+        })
+      );
+    })
+  );
+
+  // 근무일수가 사람마다 들쭉날쭉하면 감점
+  const vals = employees.map((e) => perEmp[e.id] || 0);
+  const mean = vals.reduce((a, b) => a + b, 0) / (vals.length || 1);
+  penalty += (vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length || 1)) * 40;
+
+  return penalty;
+}
+
+/* ------------------------------------------------------------------
+   화면
+   ------------------------------------------------------------------ */
+export default function ScheduleDemo() {
+  const [year, setYear] = useState(NOW.getFullYear());
+  const [month, setMonth] = useState(NOW.getMonth() + 1);
+  const [view, setView] = useState("week"); // week | month
+  const [weekStart, setWeekStart] = useState(weekKey(fmt(NOW)));
+  const [storeId, setStoreId] = useState(STORES[0].id);
+  const [employees, setEmployees] = useState(INITIAL_EMPLOYEES);
+  const [board, setBoard] = useState({});
+  const [lockMap, setLockMap] = useState({});
+  const [autoMap, setAutoMap] = useState({});
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoProgress, setAutoProgress] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const [picker, setPicker] = useState(null);
+  const [tab, setTab] = useState("board");
+  const [vacFor, setVacFor] = useState(null);
+  const [shortage, setShortage] = useState("both");
+  const [breadWeekday, setBreadWeekday] = useState(tb(16));
+  const [breadPeak, setBreadPeak] = useState(tb(17, 30));
+  const [needs, setNeeds] = useState(() => {
+    const o = {};
+    ALL_SLOTS.forEach((sl) => {
+      if (sl.half) return;
+      o[sl.key] = { weekday: sl.need, peak: sl.peak != null ? sl.peak : sl.need };
+    });
+    applyNeeds(o);
+    return o;
+  });
+
+  const demandWeekday = useMemo(() => buildDemand(false), [needs]);
+  const demandPeak = useMemo(() => buildDemand(true), [needs]);
+
+  // 필요 인원을 바꾸면 곡선 캐시를 비우고 다시 계산하게 한다
+  function patchNeed(key, kind, value) {
+    const next = { ...needs, [key]: { ...needs[key], [kind]: value } };
+    applyNeeds(next);
+    setNeeds(next);
+  }
+
+  const dates = useMemo(() => monthDates(year, month), [year, month]);
+  const gridDates = useMemo(() => gridRange(year, month), [year, month]);
+  const weekDates = useMemo(
+    () => Array.from({ length: 7 }, (_, i) => shiftDate(weekStart, i)),
+    [weekStart]
+  );
+
+  const assign = board[storeId] || {};
+  const locked = lockMap[storeId] || {};
+  const autoDates = autoMap[storeId] || {};
+  const staff = useMemo(() => employees.filter((e) => e.storeId === storeId), [employees, storeId]);
+
+  const empById = useCallback((id) => employees.find((e) => e.id === id), [employees]);
+  const dayOf = useCallback((date) => assign[date] || {}, [assign]);
+  const breadAtOf = useCallback(
+    (date) => (isPeak(date) ? breadPeak : breadWeekday),
+    [breadPeak, breadWeekday]
+  );
+  const covOf = useCallback((date) => coverage(dayOf(date), dayOf(shiftDate(date, -1))), [dayOf]);
+  const gapMinOf = useCallback((date) => gapMinutes(gapOf(covOf(date), date)), [covOf]);
+  const breaksOf = useCallback((date) => breakPlan(dayOf(date)), [dayOf]);
+  const floorOf = useCallback(
+    (date) => floorCurve(dayOf(date), breaksOf(date), breadAtOf(date)),
+    [dayOf, breaksOf, breadAtOf]
+  );
+  const floorMinOf = useCallback(
+    (date) => Math.min(...floorOf(date).slice(FLOOR_FROM, FLOOR_UNTIL)),
+    [floorOf]
+  );
+  // 출근 인원 중 휴게·빵으로 자리를 비운 인원만 뽑은 곡선
+  const restOf = useCallback(
+    (date) => staffOnFloor(dayOf(date)).map((n, i) => n - floorOf(date)[i]),
+    [dayOf, floorOf]
+  );
+
+  function moveMonth(diff) {
+    const d = new Date(year, month - 1 + diff, 1);
+    setYear(d.getFullYear());
+    setMonth(d.getMonth() + 1);
+    setSelected(null);
+  }
+
+  // 주를 옮기면 그 주의 목요일이 속한 달로 달력도 따라간다
+  function moveWeek(diff) {
+    const next = shiftDate(weekStart, diff * 7);
+    setWeekStart(next);
+    const mid = parse(shiftDate(next, 3));
+    if (mid.getFullYear() !== year || mid.getMonth() + 1 !== month) {
+      setYear(mid.getFullYear());
+      setMonth(mid.getMonth() + 1);
+    }
+    setSelected(null);
+  }
+
+  async function runAuto() {
+    // 시드를 바꿔가며 아주 여러 번 짠 뒤 가장 점수가 낮은 것을 고른다.
+    // 시도 수가 많아 시간이 좀 걸리므로 로딩 문구를 먼저 그린 뒤 청크 단위로 나눠 돈다.
+    setAutoBusy(true);
+    setAutoProgress(0);
+    await new Promise((r) => setTimeout(r, 0));
+
+    let next = null;
+    let best = Infinity;
+    const base = Math.floor(Math.random() * 100000);
+    for (let i = 0; i < AUTO_TRIES; i++) {
+      const cand = autoAssignAll({
+        dates: gridDates,
+        employees,
+        prevBoard: board,
+        lockMap,
+        shortage,
+        breadWeekday,
+        breadPeak,
+        seed: base + i,
+      });
+      const sc = scoreBoard(cand, gridDates, employees, breadWeekday, breadPeak);
+      if (sc < best) {
+        best = sc;
+        next = cand;
+      }
+      if (i % AUTO_CHUNK === AUTO_CHUNK - 1) {
+        setAutoProgress(i + 1);
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    setBoard(next);
+    const marks = {};
+    STORES.forEach((s) => {
+      marks[s.id] = {};
+      gridDates.forEach((d) => {
+        if (!(lockMap[s.id] || {})[d]) marks[s.id][d] = true;
+      });
+    });
+    setAutoMap(marks);
+    setAutoBusy(false);
+  }
+
+  function clearAll() {
+    setBoard({});
+    setLockMap({});
+    setAutoMap({});
+  }
+
+  function markEdited(date) {
+    setLockMap((p) => ({ ...p, [storeId]: { ...(p[storeId] || {}), [date]: true } }));
+    setAutoMap((p) => ({ ...p, [storeId]: { ...(p[storeId] || {}), [date]: false } }));
+  }
+
+  function addTo(date, slotKey, empId) {
+    setBoard((p) => {
+      const store = { ...(p[storeId] || {}) };
+      const day = { ...(store[date] || {}) };
+      day[slotKey] = [...(day[slotKey] || []), empId];
+      store[date] = day;
+      return { ...p, [storeId]: store };
+    });
+    markEdited(date);
+    setPicker(null);
+  }
+
+  function removeFrom(date, slotKey, empId) {
+    setBoard((p) => {
+      const store = { ...(p[storeId] || {}) };
+      const day = { ...(store[date] || {}) };
+      day[slotKey] = (day[slotKey] || []).filter((i) => i !== empId);
+      store[date] = day;
+      return { ...p, [storeId]: store };
+    });
+    markEdited(date);
+  }
+
+  function unlock(date) {
+    setLockMap((p) => {
+      const store = { ...(p[storeId] || {}) };
+      delete store[date];
+      return { ...p, [storeId]: store };
+    });
+  }
+
+  function toggleVacation(empId, date) {
+    setEmployees((prev) =>
+      prev.map((e) =>
+        e.id !== empId
+          ? e
+          : {
+              ...e,
+              vacations: e.vacations.includes(date)
+                ? e.vacations.filter((d) => d !== date)
+                : [...e.vacations, date],
+            }
+      )
+    );
+  }
+
+  const patchEmp = (empId, patch) =>
+    setEmployees((prev) => prev.map((e) => (e.id === empId ? { ...e, ...patch } : e)));
+
+  function editUntil(e) {
+    const input = prompt("근무 종료일 (YYYY-MM-DD, 비우면 해제)", e.until || "");
+    if (input === null) return;
+    patchEmp(e.id, { until: input.trim() || null });
+  }
+
+  function editAvail(e, kind) {
+    const cur = e.avail[kind];
+    const text = cur ? `${bucketLabel(cur[0])}-${bucketLabel(cur[1])}` : "";
+    const input = prompt(
+      `${kind === "weekday" ? "평일" : "금토일"} 가능 시간 (08:00-15:00 형식, 비우면 제한 없음)`,
+      text
+    );
+    if (input === null) return;
+    const t = input.trim();
+    if (!t) {
+      patchEmp(e.id, { avail: { ...e.avail, [kind]: null } });
+      return;
+    }
+    const m = t.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+    if (!m) {
+      alert("08:00-15:00 형식으로 입력해 주세요");
+      return;
+    }
+    patchEmp(e.id, { avail: { ...e.avail, [kind]: [tb(+m[1], +m[2]), tb(+m[3], +m[4])] } });
+  }
+
+  function addEmployee() {
+    const name = prompt("직원 이름");
+    if (!name?.trim()) return;
+    setEmployees((prev) => [...prev, mk(storeId, name.trim())]);
+  }
+
+  function removeEmployee(empId) {
+    if (!confirm("이 직원을 삭제할까요? 배정된 근무도 함께 지워집니다.")) return;
+    setEmployees((prev) => prev.filter((e) => e.id !== empId));
+    setBoard((p) => {
+      const nb = {};
+      Object.entries(p).forEach(([sid, days]) => {
+        nb[sid] = {};
+        Object.entries(days).forEach(([d, day]) => {
+          const nd = {};
+          Object.entries(day).forEach(([s, ids]) => (nd[s] = ids.filter((i) => i !== empId)));
+          nb[sid][d] = nd;
+        });
+      });
+      return nb;
+    });
+    setVacFor(null);
+  }
+
+  const hasSchedule = Object.values(assign).some((d) => Object.values(d).some((v) => v.length));
+  const scopeDates = view === "week" ? weekDates : dates;
+  const shortDays = useMemo(
+    () => (hasSchedule ? scopeDates.filter((d) => gapMinOf(d) > 0) : []),
+    [scopeDates, gapMinOf, hasSchedule]
+  );
+  const peakShortDays = useMemo(() => shortDays.filter(isPeak), [shortDays]);
+  const floorRiskDays = useMemo(
+    () => (hasSchedule ? scopeDates.filter((d) => floorMinOf(d) < FLOOR_MIN) : []),
+    [scopeDates, floorMinOf, hasSchedule]
+  );
+  const totalShortHours = useMemo(
+    () => Math.round(scopeDates.reduce((a, d) => a + gapMinOf(d), 0) / 60),
+    [scopeDates, gapMinOf]
+  );
+
+  const stats = useMemo(() => {
+    const s = {};
+    Object.entries(board).forEach(([sid, days]) =>
+      dates.forEach((d) =>
+        Object.entries(days[d] || {}).forEach(([slot, ids]) => {
+          const isHalf = slot.startsWith("half");
+          ids.forEach((id) => {
+            s[id] = s[id] || { days: 0, half: 0, jjapO: 0, guest: 0 };
+            s[id].days += isHalf ? 0.5 : 1;
+            if (isHalf) s[id].half += 1;
+            if (slot === "jjapO") s[id].jjapO += 1;
+            if (empById(id) && empById(id).storeId !== sid) s[id].guest += 1;
+          });
+        })
+      )
+    );
+    return s;
+  }, [board, dates, empById]);
+
+  const cells = useMemo(() => {
+    const lead = wdIndex(new Date(year, month - 1, 1));
+    return [...Array(lead).fill(null), ...dates];
+  }, [year, month, dates]);
+
+  const slotOfEmp = useCallback(
+    (empId, date) => {
+      const day = dayOf(date);
+      for (const [k, ids] of Object.entries(day)) if (ids.includes(empId)) return k;
+      return null;
+    },
+    [dayOf]
+  );
+
+  const weekRows = useMemo(() => {
+    const extra = [];
+    weekDates.forEach((d) =>
+      Object.values(dayOf(d)).forEach((ids) =>
+        ids.forEach((id) => {
+          const e = empById(id);
+          if (e && e.storeId !== storeId && !extra.some((x) => x.id === id)) extra.push(e);
+        })
+      )
+    );
+    return [...staff, ...extra];
+  }, [weekDates, dayOf, empById, staff, storeId]);
+
+  // 이번 주 근무일수. 전 매장을 합쳐야 지원 나간 날이 빠지지 않는다
+  const weekDaysOf = useCallback(
+    (empId) => {
+      let n = 0;
+      weekDates.forEach((d) =>
+        Object.values(board).forEach((days) =>
+          Object.entries(days[d] || {}).forEach(([slot, ids]) => {
+            if (ids.includes(empId)) n += slot.startsWith("half") ? 0.5 : 1;
+          })
+        )
+      );
+      return n;
+    },
+    [weekDates, board]
+  );
+
+  // 이 매장에서만 센 이번 주 근무일수
+  const storeDaysOf = useCallback(
+    (empId) => {
+      let n = 0;
+      weekDates.forEach((d) =>
+        Object.entries(dayOf(d)).forEach(([slot, ids]) => {
+          if (ids.includes(empId)) n += slot.startsWith("half") ? 0.5 : 1;
+        })
+      );
+      return n;
+    },
+    [weekDates, dayOf]
+  );
+
+  function busyElsewhere(date) {
+    const s = new Set();
+    Object.entries(board).forEach(([sid, days]) => {
+      if (sid === storeId) return;
+      Object.values(days[date] || {}).forEach((ids) => ids.forEach((i) => s.add(i)));
+    });
+    return s;
+  }
+
+  function candidates(date, slotKey) {
+    const slot = slotInfo(slotKey);
+    if (startTaken(dayOf(date), slot)) return [];
+    const isNight = !!slot.night;
+    const busy = new Set(Object.values(dayOf(date)).flat());
+    const elsewhere = busyElsewhere(date);
+    const base = isNight ? employees : staff;
+    return base.filter((e) => {
+      if (isNight ? e.kind !== "night" : e.kind === "night") return false;
+      if (!isNight && e.storeId !== storeId) return false;
+      if (e.until && date > e.until) return false;
+      if (slotKey === "jjinO" && !e.canJjinO) return false;
+      if (!canWork(e, slot, date)) return false;
+      if (busy.has(e.id) || elsewhere.has(e.id)) return false;
+      if (e.vacations.includes(date)) return false;
+      return true;
+    });
+  }
+
+  function weekLoad(empId, date) {
+    const wk = weekKey(date);
+    let n = 0;
+    Object.values(board).forEach((days) =>
+      gridDates.forEach((d) => {
+        if (weekKey(d) !== wk) return;
+        Object.entries(days[d] || {}).forEach(([slot, ids]) => {
+          if (ids.includes(empId)) n += slot.startsWith("half") ? 0.5 : 1;
+        });
+      })
+    );
+    return n;
+  }
+
+  /* 세로축 눈금·시간마다 세로 기준선·막대 안 숫자가 있는 막대 그래프.
+     막대 자체는 30분 단위 실제값을 그대로 다 그린다(합쳐서 값을 지우지 않는다).
+     다만 x축 눈금·세로 기준선은 시(1시간) 단위로만 찍어서, 같은 시간에 속한
+     반시간 두 칸이 한 덩어리로 붙어 보이게 한다. 이러면 모바일 폭에도 맞고
+     휴게처럼 반시간만 반짝 튀는 값도 그대로 보인다. 같은 규격 차트끼리는 세로
+     기준선이 같은 x 위치에 찍혀서, 위아래로 나란히 두면 같은 시간대를 눈으로 맞춰 볼 수 있다. */
+  const CHART_H = 72;
+  function AxisChart({ values, top, colorAt, guide }) {
+    const levels = Array.from({ length: top + 1 }, (_, i) => i);
+    const hourCount = Math.ceil(values.length / 2);
+    return (
+      <div className="flex flex-col">
+        <div className="flex">
+          <div
+            className="flex w-5 shrink-0 flex-col-reverse justify-between pr-1 text-right"
+            style={{ height: CHART_H }}
+          >
+            {levels.map((v) => (
+              <span key={v} className="font-mono leading-none" style={{ fontSize: 8, color: MUTED }}>
+                {v}
+              </span>
+            ))}
+          </div>
+          <div className="relative flex-1" style={{ height: CHART_H }}>
+            {levels.map((v) => (
+              <div
+                key={v}
+                className="absolute left-0 right-0"
+                style={{
+                  bottom: `${(v / top) * 100}%`,
+                  height: 1,
+                  background: v === guide ? ALERT : RULE,
+                  opacity: v === guide ? 0.7 : 0.45,
+                }}
+              />
+            ))}
+            {Array.from({ length: hourCount }, (_, h) =>
+              h > 0 ? (
+                <div
+                  key={`vg${h}`}
+                  className="absolute top-0 bottom-0"
+                  style={{ left: `${(h / hourCount) * 100}%`, borderLeft: `1px dashed ${RULE}`, opacity: 0.6 }}
+                />
+              ) : null
+            )}
+            <div className="absolute inset-0 flex items-end">
+              {Array.from({ length: hourCount }, (_, h) => (
+                <div key={h} className="flex h-full flex-1 items-end gap-[1px]">
+                  {[h * 2, h * 2 + 1]
+                    .filter((i) => i < values.length)
+                    .map((i) => {
+                      const v = Math.max(0, values[i]);
+                      return (
+                        <div key={i} className="relative flex h-full flex-1 items-end justify-center">
+                          <span
+                            className="absolute font-mono font-bold"
+                            style={{
+                              bottom: `calc(${(v / top) * 100}% + 2px)`,
+                              fontSize: 9,
+                              color: INK,
+                            }}
+                          >
+                            {v}
+                          </span>
+                          <div
+                            style={{
+                              width: "80%",
+                              height: `${(v / top) * 100}%`,
+                              background: colorAt(values[i], i),
+                              borderRadius: 2,
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        {/* 시간은 정시 단위로 한 번씩만 찍는다 */}
+        <div className="flex">
+          <div className="w-5 shrink-0" />
+          <div className="flex flex-1">
+            {Array.from({ length: hourCount }, (_, h) => (
+              <div
+                key={h}
+                className="flex-1 text-center font-mono leading-none"
+                style={{ fontSize: 8, color: MUTED }}
+              >
+                {pad2(h)}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* 누가 언제 쉬는지 시간축에 맞춰 보여준다 */
+  function BreakTimeline({ date }) {
+    const rows = breaksOf(date);
+    const breadAt = breadAtOf(date);
+    return (
+      <div className="flex flex-col gap-[2px]">
+        {rows.map((b, i) => {
+          const slot = slotInfo(b.slotKey);
+          return (
+            <div key={i} className="flex">
+              <div className="w-5 shrink-0" />
+              <div className="relative h-5 flex-1 rounded" style={{ background: "#EAE8E1" }}>
+                <div
+                  className="absolute inset-y-0 flex items-center justify-center rounded"
+                  style={{
+                    left: `${(b.from / BPD) * 100}%`,
+                    width: `${((b.to - b.from) / BPD) * 100}%`,
+                    background: slot.color,
+                  }}
+                >
+                  <span className="truncate px-1" style={{ fontSize: 8, color: PAPER }}>
+                    {empById(b.empId)?.name}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div className="flex">
+          <div className="w-5 shrink-0" />
+          <div className="relative h-5 flex-1 rounded" style={{ background: "#EAE8E1" }}>
+            <div
+              className="absolute inset-y-0 flex items-center justify-center rounded"
+              style={{
+                left: `${(breadAt / BPD) * 100}%`,
+                width: `${(BREAD_LEN / BPD) * 100}%`,
+                background: GUEST,
+              }}
+            >
+              <span style={{ fontSize: 8, color: PAPER }}>빵</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const Ticks = () => (
+    <div className="flex">
+      <div className="w-5 shrink-0" />
+      <div className="mt-1 flex flex-1 justify-between font-mono" style={{ fontSize: 9, color: MUTED }}>
+        {[0, 6, 12, 18, 24].map((h) => (
+          <span key={h}>{pad2(h % 24)}</span>
+        ))}
+      </div>
+    </div>
+  );
+
+  const headTitle =
+    view === "week"
+      ? `${weekStart.slice(5).replace("-", "/")} – ${shiftDate(weekStart, 6).slice(5).replace("-", "/")}`
+      : pad(month);
+
+  return (
+    <div
+      className="min-h-screen w-full font-sans"
+      style={{ background: PAPER, color: INK, paddingBottom: "env(safe-area-inset-bottom)" }}
+    >
+      {/* 상단 바 */}
+      <header
+        className="sticky top-0 z-20 px-4 pt-3 pb-2"
+        style={{ background: PAPER, borderBottom: `1px solid ${RULE}` }}
+      >
+        <div className="flex items-end justify-between">
+          <div className="flex items-baseline gap-2">
+            <span
+              className="font-mono font-bold tracking-tighter"
+              style={{ fontSize: view === "week" ? 20 : 30 }}
+            >
+              {headTitle}
+            </span>
+            <span className="font-mono text-xs" style={{ color: MUTED }}>
+              {year}
+            </span>
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={() => (view === "week" ? moveWeek(-1) : moveMonth(-1))}
+              className="h-9 w-9 rounded-full font-mono active:opacity-60"
+              style={{ border: `1px solid ${RULE}`, background: CARD }}
+            >
+              ‹
+            </button>
+            <button
+              onClick={() => (view === "week" ? moveWeek(1) : moveMonth(1))}
+              className="h-9 w-9 rounded-full font-mono active:opacity-60"
+              style={{ border: `1px solid ${RULE}`, background: CARD }}
+            >
+              ›
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-2 flex items-center gap-1">
+          {STORES.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => {
+                setStoreId(s.id);
+                setSelected(null);
+                setVacFor(null);
+              }}
+              className="rounded-full px-3 py-1 text-xs font-medium active:opacity-70"
+              style={
+                storeId === s.id
+                  ? { background: INK, color: PAPER }
+                  : { border: `1px solid ${RULE}`, color: MUTED }
+              }
+            >
+              {s.name}
+            </button>
+          ))}
+
+          {tab === "board" && (
+            <div className="ml-auto flex gap-1">
+              {[
+                ["week", "주"],
+                ["month", "월"],
+              ].map(([k, label]) => (
+                <button
+                  key={k}
+                  onClick={() => {
+                    setView(k);
+                    setSelected(null);
+                  }}
+                  className="h-7 w-8 rounded text-xs font-medium active:opacity-70"
+                  style={
+                    view === k
+                      ? { background: INK, color: PAPER }
+                      : { border: `1px solid ${RULE}`, color: MUTED }
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-2 flex gap-1">
+          {[
+            ["board", "근무표"],
+            ["people", "직원"],
+            ["rules", "규칙"],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className="flex-1 rounded-md py-2 text-sm font-medium active:opacity-70"
+              style={
+                tab === key
+                  ? { background: INK, color: PAPER }
+                  : { background: CARD, border: `1px solid ${RULE}`, color: MUTED }
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {/* 근무표 */}
+      {tab === "board" && (
+        <div className="px-4 pb-8">
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={runAuto}
+              disabled={autoBusy}
+              className="flex-1 rounded-md py-3 text-sm font-semibold active:opacity-70"
+              style={{
+                background: INK,
+                color: PAPER,
+                opacity: autoBusy ? 0.7 : 1,
+                cursor: autoBusy ? "default" : "pointer",
+              }}
+            >
+              {autoBusy ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span
+                    className="h-3 w-3 animate-spin rounded-full"
+                    style={{ border: `2px solid ${PAPER}`, borderTopColor: "transparent" }}
+                  />
+                  스케줄 짜는 중… ({autoProgress}/{AUTO_TRIES})
+                </span>
+              ) : (
+                "자동으로 짜기 (전 매장)"
+              )}
+            </button>
+            {hasSchedule && (
+              <button
+                onClick={clearAll}
+                disabled={autoBusy}
+                className="rounded-md px-4 text-sm active:opacity-70"
+                style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
+              >
+                비우기
+              </button>
+            )}
+          </div>
+
+          {peakShortDays.length > 0 && (
+            <div
+              className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
+              style={{ background: ALERT, color: PAPER }}
+            >
+              금토일 {peakShortDays.length}일이 비었습니다. 이 날은 채워야 하니 직접 조정하세요.
+            </div>
+          )}
+
+          {floorRiskDays.length > 0 && (
+            <div
+              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+              style={{ background: "#F5EAD6", color: "#7A5A18" }}
+            >
+              {floorRiskDays.length}일은 휴게와 빵 받는 시간이 겹쳐 바에 {FLOOR_MIN}명이 안 남습니다.
+            </div>
+          )}
+
+          {shortDays.length > 0 && (
+            <div
+              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+              style={{ background: "#F7E6E1", color: ALERT }}
+            >
+              {view === "week" ? "이번 주" : "이번 달"} {shortDays.length}일에 빈 자리가 있고, 합쳐서{" "}
+              {totalShortHours}시간 부족합니다.
+            </div>
+          )}
+
+          {/* 주간 표 */}
+          {view === "week" && (
+            <>
+              <div className="mt-4 overflow-x-auto">
+                <div style={{ minWidth: 340 }}>
+                  <div
+                    className="grid gap-[2px]"
+                    style={{ gridTemplateColumns: "40px repeat(7, minmax(0,1fr))" }}
+                  >
+                    <div />
+                    {weekDates.map((d) => {
+                      const peak = isPeak(d);
+                      const isSel = selected === d;
+                      return (
+                        <button
+                          key={d}
+                          onClick={() => setSelected(isSel ? null : d)}
+                          className="rounded-t py-1 active:opacity-60"
+                          style={{
+                            background: isSel ? INK : peak ? "#E4E1D8" : "transparent",
+                            color: isSel ? PAPER : INK,
+                          }}
+                        >
+                          <div className="font-mono text-[10px] font-semibold">
+                            {WD[wdIndex(parse(d))]}
+                          </div>
+                          <div className="font-mono text-[11px]">{Number(d.slice(8))}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {weekRows.map((e) => {
+                    const guest = e.storeId !== storeId;
+                    return (
+                      <div
+                        key={e.id}
+                        className="mt-[2px] grid gap-[2px]"
+                        style={{ gridTemplateColumns: "40px repeat(7, minmax(0,1fr))" }}
+                      >
+                        <div className="flex items-center">
+                          <span
+                            className="truncate text-[11px] font-medium"
+                            style={{ color: guest ? GUEST : INK }}
+                          >
+                            {guest ? "지원" : e.name}
+                          </span>
+                        </div>
+                        {weekDates.map((d) => {
+                          const key = slotOfEmp(e.id, d);
+                          const slot = key ? slotInfo(key) : null;
+                          const onVac = e.vacations.includes(d);
+                          const gone = e.until && d > e.until;
+                          return (
+                            <button
+                              key={d}
+                              onClick={() => setSelected(selected === d ? null : d)}
+                              className="flex h-8 items-center justify-center rounded active:opacity-60"
+                              style={{
+                                background: slot ? slot.color : CARD,
+                                border: slot ? "none" : `1px solid ${RULE}`,
+                              }}
+                            >
+                              <span
+                                className="font-mono font-semibold"
+                                style={{
+                                  fontSize: 9,
+                                  color: slot ? PAPER : onVac || gone ? ALERT : EMPTY,
+                                }}
+                              >
+                                {slot ? slot.short : onVac ? "휴" : gone ? "-" : "·"}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 표기 안내 */}
+              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
+                {ALL_SLOTS.map((s) => (
+                  <span key={s.key} className="flex items-center gap-1">
+                    <span
+                      className="rounded px-1 font-mono text-[9px] font-semibold"
+                      style={{ background: s.color, color: PAPER }}
+                    >
+                      {s.short}
+                    </span>
+                    <span className="font-mono text-[9px]" style={{ color: MUTED }}>
+                      {s.label}
+                    </span>
+                  </span>
+                ))}
+              </div>
+
+              {/* 이번 주 요약 */}
+              <div
+                className="mt-4 rounded-lg p-3"
+                style={{ background: CARD, border: `1px solid ${RULE}` }}
+              >
+                <div className="font-mono text-[11px]" style={{ color: MUTED }}>
+                  이번 주 근무일수 (쩜오 0.5)
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                  {weekRows.map((e) => {
+                    const n = weekDaysOf(e.id);
+                    const local = storeDaysOf(e.id);
+                    const guest = e.storeId !== storeId;
+                    const cap = Math.min(e.maxPerWeek, WEEK_CAP);
+                    const over = n > WEEK_CAP; // 주 6일을 넘긴 경우
+                    const plus = !over && n > cap; // 본인 상한만 넘긴 경우
+                    const under = !guest && e.minPerWeek > 0 && n < e.minPerWeek;
+                    return (
+                      <span key={e.id} className="flex items-center gap-1">
+                        <span className="text-xs" style={{ color: guest ? GUEST : INK }}>
+                          {guest ? "지원" : e.name}
+                        </span>
+                        <span
+                          className="font-mono text-xs font-semibold"
+                          style={{ color: guest ? GUEST : over ? ALERT : plus || under ? TIGHT : INK }}
+                        >
+                          {guest ? `${local}일` : `${n}/${cap}`}
+                        </span>
+                        {over && (
+                          <span className="font-mono text-[9px]" style={{ color: ALERT }}>
+                            6일초과
+                          </span>
+                        )}
+                        {plus && (
+                          <span className="font-mono text-[9px]" style={{ color: TIGHT }}>
+                            추가
+                          </span>
+                        )}
+                        {under && (
+                          <span className="font-mono text-[9px]" style={{ color: TIGHT }}>
+                            미달
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* 월 달력 */}
+          {view === "month" && (
+            <>
+              <div className="mt-4 grid grid-cols-7 gap-1">
+                {WD.map((w, i) => (
+                  <div
+                    key={w}
+                    className="pb-1 text-center font-mono text-[11px] font-semibold"
+                    style={{ color: i >= 4 ? INK : MUTED }}
+                  >
+                    {w}
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-7 gap-1">
+                {cells.map((date, i) => {
+                  if (!date) return <div key={`e${i}`} />;
+                  const day = dayOf(date);
+                  const short = hasSchedule && gapMinOf(date) > 0;
+                  const risk = hasSchedule && floorMinOf(date) < FLOOR_MIN;
+                  const peak = isPeak(date);
+                  const isSel = selected === date;
+                  const bars = [];
+                  ALL_SLOTS.forEach((s) => {
+                    if (s.half) return;
+                    const n = needOf(s, date);
+                    if (!n) return;
+                    const ids = day[s.key] || [];
+                    for (let k = 0; k < n; k++) {
+                      bars.push({ key: `${s.key}${k}`, color: ids[k] ? s.color : EMPTY });
+                    }
+                  });
+                  const extras =
+                    (day.middle || []).length +
+                    (day.earlyShort || []).length +
+                    Math.max(0, (day.close || []).length - needOf(slotInfo("close"), date)) +
+                    (day.halfAm || []).length +
+                    (day.halfPm || []).length;
+
+                  return (
+                    <button
+                      key={date}
+                      onClick={() => setSelected(isSel ? null : date)}
+                      className="relative flex h-16 flex-col items-center rounded-md pt-1 active:opacity-60"
+                      style={{
+                        background: peak ? "#EDEBE4" : CARD,
+                        border: isSel
+                          ? `2px solid ${INK}`
+                          : short
+                          ? `${peak ? 2 : 1}px ${peak ? "solid" : "dashed"} ${ALERT}`
+                          : `1px solid ${RULE}`,
+                      }}
+                    >
+                      {autoDates[date] && (
+                        <span
+                          className="absolute left-1 right-1 top-1 h-3 rounded-sm"
+                          style={{ background: MARK, opacity: 0.5 }}
+                        />
+                      )}
+                      <span className="relative font-mono text-[11px] font-semibold">
+                        {Number(date.slice(8))}
+                      </span>
+                      <span className="mt-1 flex gap-[2px]">
+                        {bars.map((b) => (
+                          <span
+                            key={b.key}
+                            className="h-3 w-[3px] rounded-full"
+                            style={{ background: b.color }}
+                          />
+                        ))}
+                      </span>
+                      <span className="mt-[2px] flex items-center gap-1">
+                        {extras > 0 && (
+                          <span className="font-mono text-[9px]" style={{ color: MUTED }}>
+                            +{extras}
+                          </span>
+                        )}
+                        {risk && (
+                          <span className="h-[5px] w-[5px] rounded-full" style={{ background: TIGHT }} />
+                        )}
+                      </span>
+                      {locked[date] && (
+                        <span className="absolute bottom-1 h-[2px] w-4" style={{ background: INK }} />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <p className="mt-3 font-mono text-[11px] leading-relaxed" style={{ color: MUTED }}>
+                바탕이 진한 칸이 금토일. 막대는 그날 필수 자리이고 회색은 빈 자리
+                <br />
+                노란 점 = 바에 {FLOOR_MIN}명이 안 남는 시간이 있음
+              </p>
+            </>
+          )}
+
+          {/* 선택한 날짜 상세 */}
+          {selected && (
+            <div className="mt-4 rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-sm font-semibold">
+                    {selected.slice(5).replace("-", "/")} ({WD[wdIndex(parse(selected))]})
+                  </span>
+                  {isPeak(selected) && (
+                    <span
+                      className="rounded px-1 py-[1px] font-mono text-[10px]"
+                      style={{ background: INK, color: PAPER }}
+                    >
+                      금토일
+                    </span>
+                  )}
+                </div>
+                {locked[selected] && (
+                  <button
+                    onClick={() => unlock(selected)}
+                    className="rounded px-2 py-1 font-mono text-[11px] active:opacity-60"
+                    style={{ border: `1px solid ${RULE}`, color: MUTED }}
+                  >
+                    잠금 풀기
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-3 rounded-md p-2" style={{ background: PAPER }}>
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+                    배정 인원
+                  </span>
+                  <span
+                    className="font-mono text-[10px]"
+                    style={{ color: gapMinOf(selected) > 0 ? ALERT : MUTED }}
+                  >
+                    {gapMinOf(selected) > 0 ? `${gapMinOf(selected)}분 부족` : "빈 자리 없음"}
+                  </span>
+                </div>
+                <div className="mt-2">
+                  <AxisChart
+                    values={covOf(selected)}
+                    top={Math.max(3, ...covOf(selected), ...demandFor(selected))}
+                    colorAt={(n, i) =>
+                      gapOf(covOf(selected), selected)[i] > 0 ? ALERT : FILLED
+                    }
+                  />
+                </div>
+
+                <div className="mt-3 flex items-center justify-between">
+                  <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+                    바 인원 (휴게·빵 제외)
+                  </span>
+                  <span
+                    className="font-mono text-[10px]"
+                    style={{
+                      color:
+                        floorMinOf(selected) < FLOOR_MIN
+                          ? ALERT
+                          : floorMinOf(selected) < FLOOR_OK
+                          ? TIGHT
+                          : MUTED,
+                    }}
+                  >
+                    17시 전 최소 {floorMinOf(selected)}명
+                  </span>
+                </div>
+                <div className="mt-2">
+                  <AxisChart
+                    values={floorOf(selected)}
+                    top={Math.max(4, ...floorOf(selected))}
+                    guide={FLOOR_MIN}
+                    colorAt={(n, i) =>
+                      i < FLOOR_FROM || i >= FLOOR_UNTIL
+                        ? EMPTY
+                        : n < FLOOR_MIN
+                        ? ALERT
+                        : FILLED
+                    }
+                  />
+                </div>
+
+                <div className="mt-3 font-mono text-[10px]" style={{ color: MUTED }}>
+                  휴게인원 (휴게+빵으로 자리 비운 인원)
+                </div>
+                <div className="mt-2">
+                  <AxisChart
+                    values={restOf(selected)}
+                    top={Math.max(2, ...restOf(selected))}
+                    colorAt={() => GUEST}
+                  />
+                </div>
+
+                <div className="mt-3 font-mono" style={{ fontSize: 10, color: MUTED }}>
+                  휴게와 빵
+                </div>
+                <div className="mt-1">
+                  <BreakTimeline date={selected} />
+                  <Ticks />
+                </div>
+              </div>
+
+              {breaksOf(selected).length > 0 && (
+                <div className="mt-3 rounded-md p-2" style={{ background: PAPER }}>
+                  <div className="font-mono text-[10px]" style={{ color: MUTED }}>
+                    휴게 순번
+                  </div>
+                  <div className="mt-2 flex flex-col gap-1">
+                    {breaksOf(selected).map((b, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ background: slotInfo(b.slotKey).color }}
+                        />
+                        <span className="text-xs">{empById(b.empId)?.name}</span>
+                        <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+                          {slotInfo(b.slotKey).label}
+                        </span>
+                        <span className="ml-auto font-mono text-[11px]">
+                          {bucketLabel(b.from)}~{bucketLabel(b.to)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-3 flex flex-col gap-2">
+                {ALL_SLOTS.map((slot) => {
+                  const ids = dayOf(selected)[slot.key] || [];
+                  const req = slot.half ? 0 : needOf(slot, selected);
+                  const lack = !slot.half && ids.length < req;
+                  const cap = slot.half ? 99 : req + slot.extra;
+                  const blocked = startTaken(dayOf(selected), slot);
+
+                  return (
+                    <div
+                      key={slot.key}
+                      className="rounded-md p-2"
+                      style={{
+                        border: lack && !blocked ? `1px dashed ${ALERT}` : `1px solid ${RULE}`,
+                        background: PAPER,
+                        opacity: blocked && ids.length === 0 ? 0.45 : 1,
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="rounded px-1 font-mono text-[9px] font-semibold"
+                          style={{ background: slot.color, color: PAPER }}
+                        >
+                          {slot.short}
+                        </span>
+                        <span className="text-xs font-semibold">{slot.label}</span>
+                        <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+                          {timeText(slot)}
+                        </span>
+                        <span
+                          className="ml-auto font-mono text-[10px]"
+                          style={{ color: lack && !blocked ? ALERT : MUTED }}
+                        >
+                          {blocked && ids.length === 0
+                            ? "같은 시각 사용중"
+                            : `${ids.length}${slot.half ? "" : `/${req}`}`}
+                        </span>
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {ids.map((id) => {
+                          const e = empById(id);
+                          const guest = e && e.storeId !== storeId;
+                          return (
+                            <button
+                              key={id}
+                              onClick={() => removeFrom(selected, slot.key, id)}
+                              className="rounded-full px-3 py-2 text-xs font-medium active:opacity-60"
+                              style={{ background: guest ? GUEST : slot.color, color: PAPER }}
+                            >
+                              {e?.name}
+                              {guest && ` (${storeName(e.storeId).split(" ")[0]} 지원)`} ×
+                            </button>
+                          );
+                        })}
+                        {!blocked && ids.length < cap && (
+                          <button
+                            onClick={() => setPicker({ date: selected, slotKey: slot.key })}
+                            className="rounded-full px-3 py-2 text-xs active:opacity-60"
+                            style={{ border: `1px dashed ${RULE}`, color: MUTED }}
+                          >
+                            + 넣기
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 월 근무 요약 */}
+          {view === "month" && hasSchedule && (
+            <div className="mt-4 rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+              <div className="font-mono text-[11px]" style={{ color: MUTED }}>
+                이번 달 근무일수 (쩜오 0.5, 전 매장 합산)
+              </div>
+              <div className="mt-2 flex flex-col gap-2">
+                {staff.map((e) => {
+                  const st = stats[e.id] || { days: 0, half: 0, guest: 0 };
+                  const top = Math.max(1, ...staff.map((s) => stats[s.id]?.days || 0));
+                  return (
+                    <div key={e.id} className="flex items-center gap-2">
+                      <span className="w-16 shrink-0 truncate text-xs">
+                        {e.name}
+                        {e.kind === "night" && (
+                          <span className="ml-1 font-mono text-[9px]" style={{ color: MUTED }}>
+                            야
+                          </span>
+                        )}
+                      </span>
+                      <span className="h-2 flex-1 rounded-full" style={{ background: PAPER }}>
+                        <span
+                          className="block h-2 rounded-full"
+                          style={{
+                            width: `${(st.days / top) * 100}%`,
+                            background: e.kind === "night" ? INK : FILLED,
+                          }}
+                        />
+                      </span>
+                      <span className="w-8 text-right font-mono text-xs">{st.days}</span>
+                      {st.guest > 0 ? (
+                        <span className="w-12 text-right font-mono text-[10px]" style={{ color: GUEST }}>
+                          지원{st.guest}
+                        </span>
+                      ) : (
+                        <span
+                          className="w-12 text-right font-mono text-[10px]"
+                          style={{ color: st.half > e.maxHalf ? ALERT : MUTED }}
+                        >
+                          쩜{st.half}/{e.maxHalf}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 직원 */}
+      {tab === "people" && (
+        <div className="px-4 pb-8">
+          <button
+            onClick={addEmployee}
+            className="mt-3 w-full rounded-md py-3 text-sm font-semibold active:opacity-70"
+            style={{ background: INK, color: PAPER }}
+          >
+            직원 추가
+          </button>
+
+          <div className="mt-3 flex flex-col gap-2">
+            {staff.map((e) => {
+              const st = stats[e.id] || { days: 0, half: 0, jjapO: 0, guest: 0 };
+              return (
+                <div key={e.id} className="rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold">{e.name}</span>
+                    {e.until && (
+                      <span
+                        className="rounded px-1 py-[1px] font-mono text-[10px]"
+                        style={{ background: "#F7E6E1", color: ALERT }}
+                      >
+                        {e.until.slice(5).replace("-", "/")}까지
+                      </span>
+                    )}
+                    {Object.keys(e.pins || {}).length > 0 && (
+                      <span
+                        className="rounded px-1 py-[1px] font-mono text-[10px]"
+                        style={{ background: "#E4EDE9", color: FILLED }}
+                      >
+                        {Object.entries(e.pins)
+                          .map(([d, k]) => `${Number(d.slice(8))}일 ${slotInfo(k).label}`)
+                          .join(", ")}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => removeEmployee(e.id)}
+                      className="ml-auto font-mono text-[11px] active:opacity-60"
+                      style={{ color: ALERT }}
+                    >
+                      삭제
+                    </button>
+                  </div>
+
+                  {e.kind === "day" && (
+                    <button
+                      onClick={() => patchEmp(e.id, { canJjinO: !e.canJjinO })}
+                      className="mt-3 flex w-full items-center justify-between rounded-md px-3 py-3 active:opacity-60"
+                      style={e.canJjinO ? { background: FILLED, color: PAPER } : { border: `1px solid ${RULE}` }}
+                    >
+                      <span className="text-sm font-medium">찐오 가능</span>
+                      <span className="font-mono text-[11px]" style={{ color: e.canJjinO ? PAPER : MUTED }}>
+                        짭오 {st.jjapO}회 누적
+                      </span>
+                    </button>
+                  )}
+
+                  {e.kind === "night" && st.guest > 0 && (
+                    <div
+                      className="mt-3 rounded-md px-3 py-2 font-mono text-[11px]"
+                      style={{ background: "#F3EEE0", color: GUEST }}
+                    >
+                      이번 달 타 지점 지원 {st.guest}일
+                    </div>
+                  )}
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 text-xs" style={{ color: MUTED }}>
+                      구분
+                    </span>
+                    {[
+                      ["day", "주간"],
+                      ["night", "야간"],
+                    ].map(([k, label]) => (
+                      <button
+                        key={k}
+                        onClick={() => patchEmp(e.id, { kind: k })}
+                        className="h-8 flex-1 rounded text-xs active:opacity-60"
+                        style={
+                          e.kind === k
+                            ? { background: INK, color: PAPER }
+                            : { border: `1px solid ${RULE}`, color: MUTED }
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 text-xs" style={{ color: MUTED }}>
+                      주 최대
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {[3, 4, 5, 6].map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => patchEmp(e.id, { maxPerWeek: n })}
+                          className="h-8 flex-1 rounded font-mono text-xs active:opacity-60"
+                          style={
+                            e.maxPerWeek === n
+                              ? { background: INK, color: PAPER }
+                              : { border: `1px solid ${RULE}`, color: MUTED }
+                          }
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 text-xs" style={{ color: MUTED }}>
+                      주 최소
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {[0, 2, 3, 4].map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => patchEmp(e.id, { minPerWeek: n })}
+                          className="h-8 flex-1 rounded font-mono text-xs active:opacity-60"
+                          style={
+                            e.minPerWeek === n
+                              ? { background: INK, color: PAPER }
+                              : { border: `1px solid ${RULE}`, color: MUTED }
+                          }
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 shrink-0 text-xs" style={{ color: MUTED }}>
+                      가능 시간
+                    </span>
+                    {[
+                      ["weekday", "평일"],
+                      ["peak", "금토일"],
+                    ].map(([k, label]) => (
+                      <button
+                        key={k}
+                        onClick={() => editAvail(e, k)}
+                        className="h-8 flex-1 rounded font-mono text-[10px] active:opacity-60"
+                        style={
+                          e.avail[k]
+                            ? { background: GUEST, color: PAPER }
+                            : { border: `1px solid ${RULE}`, color: MUTED }
+                        }
+                      >
+                        {label}{" "}
+                        {e.avail[k]
+                          ? `${bucketLabel(e.avail[k][0])}~${bucketLabel(e.avail[k][1])}`
+                          : "종일"}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 shrink-0 text-xs" style={{ color: MUTED }}>
+                      고정 요일
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {WD.map((w, i) => {
+                        const on = (e.fixedDays || []).includes(i);
+                        return (
+                          <button
+                            key={w}
+                            onClick={() =>
+                              patchEmp(e.id, {
+                                fixedDays: on
+                                  ? e.fixedDays.filter((d) => d !== i)
+                                  : [...(e.fixedDays || []), i],
+                              })
+                            }
+                            className="h-8 flex-1 rounded text-[11px] active:opacity-60"
+                            style={
+                              on
+                                ? { background: INK, color: PAPER }
+                                : { border: `1px solid ${RULE}`, color: MUTED }
+                            }
+                          >
+                            {w}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex gap-1">
+                    <button
+                      onClick={() => setVacFor(vacFor === e.id ? null : e.id)}
+                      className="flex-1 rounded-md py-2 text-xs active:opacity-60"
+                      style={{ border: `1px solid ${RULE}`, color: MUTED }}
+                    >
+                      휴가 {e.vacations.filter((d) => d.startsWith(`${year}-${pad(month)}`)).length}일
+                      {vacFor === e.id ? " 닫기" : " 지정"}
+                    </button>
+                    <button
+                      onClick={() => editUntil(e)}
+                      className="rounded-md px-3 py-2 text-xs active:opacity-60"
+                      style={{ border: `1px solid ${RULE}`, color: MUTED }}
+                    >
+                      종료일
+                    </button>
+                  </div>
+
+                  {vacFor === e.id && (
+                    <div className="mt-2 grid grid-cols-7 gap-1">
+                      {cells.map((date, i) =>
+                        !date ? (
+                          <div key={`v${i}`} />
+                        ) : (
+                          <button
+                            key={date}
+                            onClick={() => toggleVacation(e.id, date)}
+                            className="h-9 rounded font-mono text-[11px] active:opacity-60"
+                            style={
+                              e.vacations.includes(date)
+                                ? { background: ALERT, color: PAPER }
+                                : { border: `1px solid ${RULE}`, color: MUTED }
+                            }
+                          >
+                            {Number(date.slice(8))}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 규칙 */}
+      {tab === "rules" && (
+        <div className="px-4 pb-8">
+          <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <div className="text-sm font-semibold">근무타입</div>
+            <div className="mt-1 font-mono text-[10px]" style={{ color: MUTED }}>
+              평일 / 금토일
+            </div>
+            <div className="mt-2 flex flex-col gap-1">
+              {ALL_SLOTS.map((s) => (
+                <div key={s.key} className="flex items-center gap-2 py-1">
+                  <span
+                    className="w-9 rounded text-center font-mono text-[9px] font-semibold"
+                    style={{ background: s.color, color: PAPER }}
+                  >
+                    {s.short}
+                  </span>
+                  <span className="w-14 text-xs font-medium">{s.label}</span>
+                  <span className="font-mono text-[11px]" style={{ color: MUTED }}>
+                    {timeText(s)}
+                  </span>
+                  <span className="ml-auto font-mono text-[11px]" style={{ color: MUTED }}>
+                    {s.half
+                      ? "보충"
+                      : `${needs[s.key]?.weekday ?? 0} / ${needs[s.key]?.peak ?? 0}명`}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-[11px] leading-relaxed" style={{ color: MUTED }}>
+              마감을 뺀 나머지는 같은 시각에 두 명이 출근할 수 없습니다. 찐오, 이른오전, 오전쩜오는
+              모두 8시 출근이라 하루에 하나만 씁니다.
+            </p>
+          </div>
+
+          {/* 필요 인원 직접 조절 */}
+          <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <div className="text-sm font-semibold">자리별 필수 인원</div>
+            <div className="mt-1 text-[11px]" style={{ color: MUTED }}>
+              0으로 두면 인원이 남을 때만 채우는 여유 자리가 됩니다. 동시에 몇 명이 서 있게 될지가
+              여기서 정해집니다.
+            </div>
+            {ALL_SLOTS.filter((sl) => !sl.half).map((sl) => (
+              <div key={sl.key} className="mt-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="w-9 rounded text-center font-mono text-[9px] font-semibold"
+                    style={{ background: sl.color, color: PAPER }}
+                  >
+                    {sl.short}
+                  </span>
+                  <span className="text-xs font-medium">{sl.label}</span>
+                </div>
+                {[
+                  ["weekday", "평일"],
+                  ["peak", "금토일"],
+                ].map(([kind, label]) => (
+                  <div key={kind} className="mt-1 flex items-center gap-2">
+                    <span className="w-12 shrink-0 text-[11px]" style={{ color: MUTED }}>
+                      {label}
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {[0, 1, 2, 3].map((v) => (
+                        <button
+                          key={v}
+                          onClick={() => patchNeed(sl.key, kind, v)}
+                          className="h-7 flex-1 rounded font-mono text-[11px] active:opacity-60"
+                          style={
+                            (needs[sl.key]?.[kind] ?? 0) === v
+                              ? { background: INK, color: PAPER }
+                              : { border: `1px solid ${RULE}`, color: MUTED }
+                          }
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <div className="text-sm font-semibold">연속 근무 제한</div>
+            <p className="mt-2 text-[11px] leading-relaxed" style={{ color: MUTED }}>
+              주 근무일은 누구든 최대 {WEEK_CAP}일입니다. 인원이 모자라도 이 선은 넘기지 않습니다.
+              <br />
+              마감 다음날 오픈은 한 사람당 주 1회까지입니다.
+              <br />
+              마감 - 오픈 - 마감으로 이어지는 3일 패턴은 아예 만들지 않습니다.
+            </p>
+          </div>
+
+          <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <div className="text-sm font-semibold">휴게와 빵 배송</div>
+            <p className="mt-2 text-[11px] leading-relaxed" style={{ color: MUTED }}>
+              휴게는 1시간이고 동시에 한 명만 쉽니다. 오픈조는 12:30부터, 마감조는 15:30부터 출근이
+              이른 순서대로 돕니다. 순번이 퇴근 시각을 넘으면 퇴근 한 시간 전으로 당깁니다. 6시간짜리
+              쩜오는 휴게를 돌지 않습니다.
+            </p>
+
+            {[
+              ["평일", breadWeekday, setBreadWeekday],
+              ["금토일", breadPeak, setBreadPeak],
+            ].map(([label, val, setter]) => (
+              <div key={label} className="mt-3 flex items-center gap-2">
+                <span className="w-14 shrink-0 text-xs" style={{ color: MUTED }}>
+                  {label} 빵
+                </span>
+                <div className="flex flex-1 gap-1">
+                  {[tb(14), tb(15), tb(16), tb(17), tb(17, 30)].map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setter(t)}
+                      className="h-8 flex-1 rounded font-mono text-[10px] active:opacity-60"
+                      style={
+                        val === t
+                          ? { background: INK, color: PAPER }
+                          : { border: `1px solid ${RULE}`, color: MUTED }
+                      }
+                    >
+                      {bucketLabel(t)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            <div className="mt-4 flex items-center gap-3 font-mono text-[10px]" style={{ color: MUTED }}>
+              <span className="flex items-center gap-1">
+                <span className="h-2 w-2 rounded-full" style={{ background: FILLED }} />
+                {FLOOR_OK}명 이상
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="h-2 w-2 rounded-full" style={{ background: TIGHT }} />
+                {FLOOR_MIN}명
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="h-2 w-2 rounded-full" style={{ background: ALERT }} />
+                {FLOOR_MIN}명 미만
+              </span>
+            </div>
+            <p className="mt-2 font-mono text-[10px]" style={{ color: MUTED }}>
+              17시 이후는 한가하므로 이 기준을 적용하지 않습니다.
+            </p>
+          </div>
+
+          <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <div className="text-sm font-semibold">시간대별 필요 인원</div>
+            {[
+              ["평일 (월~목)", demandWeekday],
+              ["금토일", demandPeak],
+            ].map(([label, arr]) => (
+              <div key={label} className="mt-3">
+                <div className="font-mono text-[10px]" style={{ color: MUTED }}>
+                  {label}
+                </div>
+                <div className="mt-1">
+                  <AxisChart
+                    values={arr}
+                    top={Math.max(...demandPeak, ...demandWeekday)}
+                    colorAt={() => INK}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <div className="text-sm font-semibold">평일에 인원이 모자랄 때</div>
+            <div className="mt-1 text-[11px]" style={{ color: MUTED }}>
+              금토일은 이 설정과 무관하게 쩜오와 추가근무를 모두 씁니다.
+            </div>
+            <div className="mt-2 flex flex-col gap-1">
+              {[
+                ["leave", "비워두기", "빈 시간대를 그대로 남긴다"],
+                ["half", "쩜오만", "비는 시간을 가장 많이 덮는 쩜오를 넣는다"],
+                ["extra", "하루 더만", "주 상한을 넘겨 정규 자리에 넣는다"],
+                ["both", "쩜오 먼저, 그래도 모자라면 하루 더", "둘 다 쓴다"],
+              ].map(([k, label, desc]) => (
+                <button
+                  key={k}
+                  onClick={() => setShortage(k)}
+                  className="rounded-md px-3 py-3 text-left active:opacity-60"
+                  style={shortage === k ? { background: INK, color: PAPER } : { border: `1px solid ${RULE}` }}
+                >
+                  <div className="text-sm font-medium">{label}</div>
+                  <div className="mt-[2px] text-[11px]" style={{ color: shortage === k ? RULE : MUTED }}>
+                    {desc}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p className="mt-4 font-mono text-[11px] leading-relaxed" style={{ color: MUTED }}>
+            배정 순서는 못박은 근무 → 고정 요일 → 주 최소 미달자 → 필수 자리 → 여유 자리 → 부족분
+            보충입니다. 주 단위로 금토일을 먼저 잡고 평일을 채웁니다. 야간은 자기 매장 인력을 먼저
+            쓰고, 안 되면 주 6일까지 늘린 뒤, 그래도 모자라면 다른 지점 야간 직원이 지원을 옵니다.
+          </p>
+        </div>
+      )}
+
+      {/* 직원 고르기 시트 */}
+      {picker && (
+        <div
+          className="fixed inset-0 z-30 flex items-end"
+          style={{ background: "rgba(22,32,43,0.4)" }}
+          onClick={() => setPicker(null)}
+        >
+          <div
+            className="max-h-[70vh] w-full overflow-y-auto rounded-t-2xl p-4"
+            style={{ background: CARD, paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">{slotInfo(picker.slotKey).label} 넣기</span>
+              <span className="font-mono text-[11px]" style={{ color: MUTED }}>
+                {picker.date.slice(5).replace("-", "/")}
+              </span>
+              <button
+                onClick={() => setPicker(null)}
+                className="ml-auto font-mono text-xs active:opacity-60"
+                style={{ color: MUTED }}
+              >
+                닫기
+              </button>
+            </div>
+
+            <div className="mt-3 flex flex-col gap-1">
+              {candidates(picker.date, picker.slotKey).map((e) => {
+                const load = weekLoad(e.id, picker.date);
+                const overWeek = load >= Math.min(e.maxPerWeek, WEEK_CAP);
+                const halfUsed = stats[e.id]?.half || 0;
+                const isHalf = !!slotInfo(picker.slotKey).half;
+                const overHalf = isHalf && halfUsed >= e.maxHalf;
+                const guest = e.storeId !== storeId;
+                return (
+                  <button
+                    key={e.id}
+                    onClick={() => addTo(picker.date, picker.slotKey, e.id)}
+                    className="flex items-center gap-2 rounded-md px-3 py-3 text-left active:opacity-60"
+                    style={{ border: `1px solid ${guest ? GUEST : RULE}` }}
+                  >
+                    <span className="flex-1 text-sm font-medium">
+                      {e.name}
+                      {guest && (
+                        <span className="ml-1 font-mono text-[10px]" style={{ color: GUEST }}>
+                          {storeName(e.storeId).split(" ")[0]}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-mono text-[11px]" style={{ color: overWeek ? ALERT : MUTED }}>
+                      주 {load}/{Math.min(e.maxPerWeek, WEEK_CAP)}
+                    </span>
+                    {isHalf && (
+                      <span className="font-mono text-[11px]" style={{ color: overHalf ? ALERT : MUTED }}>
+                        쩜 {halfUsed}/{e.maxHalf}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {candidates(picker.date, picker.slotKey).length === 0 && (
+                <div className="py-6 text-center text-xs" style={{ color: MUTED }}>
+                  넣을 수 있는 직원이 없습니다. 자격, 가능 시간, 휴가, 종료일을 확인해 보세요.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -18,7 +18,7 @@ class Employee(BaseModel):
     minPerWeek: int = 0
     maxWeekday: Optional[int] = None  # 평일(비피크)만 따로 거는 상한. None이면 제한 없음
     maxHalf: int = 0
-    canJjinO: bool = False
+    canEightStart: bool = False  # 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
     until: Optional[str] = None
     avail: Optional[Avail] = None
     fixedDays: List[int] = Field(default_factory=list)
@@ -81,6 +81,9 @@ class Rules(BaseModel):
     shortage: Literal["leave", "half", "extra", "both"] = "both"
     # 9.1에서 true로 확정. 필드는 남겨 프론트가 실험할 수 있게 하되 기본값·항상 보내는 값은 true.
     requireSlotFill: bool = True
+    # 오전(9/10시 시작) 계열, 오후(12/13시 시작) 계열 각각 주당 최대 출근 횟수. 한쪽 계열로
+    # 몰리는 걸 막기 위함 (avail로 한 계열에 고정된 직원에게는 자연히 걸리지 않는다).
+    familyStartCap: int = 3
 
 
 class Weights(BaseModel):

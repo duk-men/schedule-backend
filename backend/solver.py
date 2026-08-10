@@ -65,13 +65,17 @@ def solve(req: SolveRequest) -> SolveResponse:
                 arr[i % BPD] += n
         return arr
 
+    # 8시에 출근하는 자리 전부 (찐오/이른오전/오전쩜오 등, half 포함). canEightStart 자격
+    # 판정과 3번 제약(같은 시각 출근 그룹 배타)이 이미 이 기준으로 묶여 있는 것과 동일한 정의다.
+    EIGHT_K = {key for key, s in SLOTS.items() if not s["night"] and s["frm"] == tb(8)}
+
     # ---------- 직원 ----------
     EMP = []
     for e in req.employees:
         EMP.append(dict(
             id=e.id, name=e.name, storeId=e.storeId, kind=e.kind,
             maxw=e.maxPerWeek, minw=e.minPerWeek, maxweekday=e.maxWeekday, maxhalf=e.maxHalf,
-            jjino=e.canJjinO, until=e.until, avail=e.avail,
+            eightstart=e.canEightStart, until=e.until, avail=e.avail,
             fixed=set(e.fixedDays), pins=e.pins, vacations=set(e.vacations),
         ))
     E = len(EMP)
@@ -93,7 +97,7 @@ def solve(req: SolveRequest) -> SolveResponse:
         s = SLOTS[key]
         if s["night"] != (e["kind"] == "night"):
             return False
-        if key == "jjinO" and not e["jjino"]:
+        if key in EIGHT_K and not e["eightstart"]:
             return False
         if not s["night"] and e["storeId"] != req.storeId:
             return False  # 주간 슬롯은 자기 매장만
@@ -285,6 +289,34 @@ def solve(req: SolveRequest) -> SolveResponse:
         wv = m.NewIntVar(0, req.rules.weekCap, f"weekdaycount{ei}")
         m.Add(wv == sum(terms) + locked_weekday_count[ei])
         m.Add(wv <= e["maxweekday"])
+
+    # ---------- 4.6 오전/오후 계열 편중 방지 ----------
+    # 오전(9/10시 시작)과 오후(12/13시 시작)를 각각 별도 계열로 보고, 한 계열을 주당
+    # familyStartCap회 넘게 서지 못하게 한다. avail로 이미 한 계열에 묶인 직원(예: 배정서는
+    # 8-15만 가능해 이 두 계열 자체에 해당하는 x 변수가 없다)에게는 자연히 걸리지 않는다.
+    FAMILY_STARTS = {"morning": (tb(9), tb(10)), "afternoon": (tb(12), tb(13))}
+    family_keys = {
+        fam: [key for key, s in SLOTS.items() if not s["night"] and s["frm"] in starts]
+        for fam, starts in FAMILY_STARTS.items()
+    }
+    locked_family_count = {fam: defaultdict(int) for fam in FAMILY_STARTS}
+    for d_str in locked_set:
+        day_data = existing_day(req.storeId, d_str)
+        for fam, keys in family_keys.items():
+            for key in keys:
+                for emp_id in day_data.get(key, []):
+                    ei = id_to_ei.get(emp_id)
+                    if ei is not None:
+                        locked_family_count[fam][ei] += 1
+
+    for fam, keys in family_keys.items():
+        if not keys:
+            continue
+        for ei, e in enumerate(EMP):
+            terms = [X(ei, di, key) for di in range(D) for key in keys if X(ei, di, key) is not None]
+            if not terms:
+                continue
+            m.Add(sum(terms) + locked_family_count[fam][ei] <= req.rules.familyStartCap)
 
     # ---------- 5. 주 최소 근무 (미달 시 벌점) ----------
     minw_short = {}

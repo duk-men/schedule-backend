@@ -39,7 +39,7 @@ const rangeLabel = (s) =>
 const SHIFTS = [
   { key: "jjinO", label: "찐오", from: tb(8), to: tb(18), need: 1, extra: 0, open: true, color: "#2F6F5E" },
   { key: "earlyShort", label: "이른오전", from: tb(8), to: tb(15), need: 0, extra: 1, open: true, color: "#4A7C6F" },
-  { key: "jjapO", label: "짭오", from: tb(9), to: tb(19), need: 0, peak: 1, extra: 1, open: true, color: "#3D5A98" },
+  { key: "jjapO", label: "짭오", from: tb(9), to: tb(19), need: 1, peak: 1, extra: 0, open: true, color: "#3D5A98" },
   { key: "close", label: "마감", from: tb(12), to: tb(22), need: 1, peak: 1, extra: 0, late: true, color: "#B4472C" },
   { key: "thirteen", label: "13", from: tb(13), to: tb(23), need: 1, extra: 0, late: true, color: "#6B4A7A" },
   { key: "middle", label: "미들", from: tb(10), to: tb(20), need: 0, extra: 1, open: true, color: "#8A6A2F" },

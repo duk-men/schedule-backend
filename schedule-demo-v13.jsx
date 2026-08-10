@@ -1,4 +1,5 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
+import { health, solveWeek, SolveError } from "./src/api.js";
 
 /* ------------------------------------------------------------------
    색상 토큰
@@ -54,7 +55,8 @@ const ALL_SLOTS = [...SHIFTS, ...HALF].map((s) => ({ ...s, short: rangeLabel(s) 
 const slotInfo = (key) => ALL_SLOTS.find((s) => s.key === key);
 const timeText = (s) => `${bucketLabel(s.from)}–${bucketLabel(s.to)}`;
 
-// 마감만 여러 명이 같은 시각에 출근할 수 있다
+// 마감만 여러 명이 같은 시각에 출근할 수 있다. 8시 출근(찐오/이른오전/오전쩜오)과
+// 9시 출근(짭오)은 그 시각에 오직 한 명만 — 슬롯 종류가 달라도 마찬가지다.
 const START_SHARED = ["close"];
 function startTaken(day, slot) {
   if (START_SHARED.includes(slot.key)) return false;
@@ -74,8 +76,6 @@ const WEEK_CAP = 6; // 어떤 경우에도 주 6일을 넘길 수 없다
 // 2500회부터는 6번 다 똑같이 가장 좋은 결과를 찾았다). 그래서 2500으로 둔다.
 const AUTO_TRIES = 2500;
 const AUTO_CHUNK = 10; // 한 틱에 처리할 시도 수. 이 단위로 쪼개서 화면이 안 멈추게 한다
-// 13(마감보다 1시간 늦게 끝남)을 마감보다 먼저 채운다. 한 명만 남는 날,
-// 마감이 이기면 22~23시가 비지만 13이 이기면 그 시간까지 커버되기 때문.
 const FILL_ORDER = ["jjinO", "jjapO", "thirteen", "close", "earlyShort", "middle"];
 
 /* ------------------------------------------------------------------
@@ -268,6 +268,7 @@ const mk = (storeId, name, opt = {}) => ({
   kind: opt.kind || "day",
   maxPerWeek: opt.maxPerWeek ?? 5,
   minPerWeek: opt.minPerWeek ?? 0,
+  maxWeekday: opt.maxWeekday ?? null, // 평일(비피크)만 따로 거는 상한. null이면 제한 없음
   maxHalf: opt.maxHalf ?? 4,
   canJjinO: opt.canJjinO ?? true,
   until: opt.until || null,
@@ -290,10 +291,18 @@ const INITIAL_EMPLOYEES = [
   mk("sinjung", "배정서", {
     canJjinO: false,
     minPerWeek: 3,
-    maxPerWeek: 4,
+    maxPerWeek: 4, // 평일+주말 합쳐 최대 4번
+    maxWeekday: 3, // 평일만 최대 3번
+    maxHalf: 0, // 쩜오(8-14)로 쪼개지 않고 무조건 이른오전(8-15)로만 들어가게
     avail: { weekday: [tb(8), tb(15)], peak: [tb(8), tb(15)] },
   }),
-  mk("sinjung", "조은솔", { kind: "night", maxHalf: 0, canJjinO: false }),
+  mk("sinjung", "조은솔", {
+    kind: "night",
+    maxHalf: 0,
+    canJjinO: false,
+    minPerWeek: 6, // 무조건 주 6일 — 나머지 하루만 타 매장 지원으로 채운다
+    maxPerWeek: 6,
+  }),
 
   mk("songdo", "김서준"),
   mk("songdo", "이하윤"),
@@ -602,7 +611,12 @@ function autoAssignAll({
         .sort((a, b) => (total[a.id] || 0) - (total[b.id] || 0))
         .forEach((e) => placeAnywhere(store.id, date, day, e));
 
-      // 필수 인원
+      // 필수 인원. 13(마감보다 1시간 늦게 끝남)을 마감보다 먼저 채운다.
+      // 사람이 한 명만 남는 날, 마감이 이기면 22~23시가 비지만 13이 이기면
+      // 그 시간까지 커버된다. (아래 '판단 기준' 설명 참고: 매 순간 실제
+      // 부족분을 계산해서 고르는 방식도 시도해봤지만, 이 상황은 여러 자리가
+      // 수학적으로 완전히 동점이라 결국 순서로 결판나는 경우였다. 그래서
+      // 정교한 계산 대신, 여러 조건으로 검증해 항상 같거나 나은 이 순서를 쓴다.)
       for (const key of FILL_ORDER) {
         const slot = slotInfo(key);
         const want = needOf(slot, date) - (day[key] || []).length;
@@ -610,9 +624,7 @@ function autoAssignAll({
         place(store.id, date, key, pool(store.id, slot, date).slice(0, want));
       }
 
-      // 여유분. 그 주에 인력이 남고, 실제로 그 시간대가 부족할 때만 쓴다.
-      // FILL_ORDER 순서 그대로 돌아서, 필수 자리(찐오/마감/13)가 위 단계에서
-      // 못 채워졌으면 미들·짭오 같은 여유 자리보다 먼저 이 자리부터 재시도한다.
+      // 여유분. 그 주에 인력이 남고, 실제로 그 시간대가 부족할 때만 쓴다
       if ((weekSlack[`${store.id}|${weekKey(date)}`] || 0) > 0) {
         for (const key of FILL_ORDER) {
           const slot = slotInfo(key);
@@ -725,7 +737,11 @@ export default function ScheduleDemo() {
   const [lockMap, setLockMap] = useState({});
   const [autoMap, setAutoMap] = useState({});
   const [autoBusy, setAutoBusy] = useState(false);
-  const [autoProgress, setAutoProgress] = useState(0);
+  const [serverBreaks, setServerBreaks] = useState({}); // date -> [{empId,from,to}], 서버가 계산한 휴게
+  const [diagnostics, setDiagnostics] = useState(null); // 마지막 계산 결과의 penalties/perDay 등
+  const [solveMeta, setSolveMeta] = useState(null); // { status, objective, bound, wallTimeSec, warnings }
+  const [solveError, setSolveError] = useState(null);
+  const [serverOk, setServerOk] = useState(null); // null=확인중 | true | false
   const [copyStatus, setCopyStatus] = useState("idle"); // idle | copied | error
   const [selected, setSelected] = useState(null);
   const [picker, setPicker] = useState(null);
@@ -746,6 +762,11 @@ export default function ScheduleDemo() {
 
   const demandWeekday = useMemo(() => buildDemand(false), [needs]);
   const demandPeak = useMemo(() => buildDemand(true), [needs]);
+
+  // 계산 서버가 떠 있는지 기동 시 1회 확인한다 (SPEC.md 7.5)
+  useEffect(() => {
+    health().then((h) => setServerOk(!!h.ok));
+  }, []);
 
   // 필요 인원을 바꾸면 곡선 캐시를 비우고 다시 계산하게 한다
   function patchNeed(key, kind, value) {
@@ -774,7 +795,25 @@ export default function ScheduleDemo() {
   );
   const covOf = useCallback((date) => coverage(dayOf(date), dayOf(shiftDate(date, -1))), [dayOf]);
   const gapMinOf = useCallback((date) => gapMinutes(gapOf(covOf(date), date)), [covOf]);
-  const breaksOf = useCallback((date) => breakPlan(dayOf(date)), [dayOf]);
+  // 서버가 돌려준 휴게를 우선 쓴다. 단, 그 날을 수동 편집(=잠금)했다면 서버 휴게는
+  // 더 이상 실제 배정과 맞지 않을 수 있어 무효로 보고 기존 breakPlan으로 되돌린다.
+  // (SPEC.md 7.3) 서버 응답엔 slotKey가 없어 그 날 배정에서 역으로 찾아 붙인다.
+  const breaksOf = useCallback(
+    (date) => {
+      const raw = !locked[date] ? serverBreaks[date] : null;
+      if (!raw) return breakPlan(dayOf(date));
+      const day = dayOf(date);
+      return raw
+        .map((b) => {
+          const entry = Object.entries(day).find(
+            ([key, ids]) => ids.includes(b.empId) && !slotInfo(key).half && !slotInfo(key).night
+          );
+          return entry ? { empId: b.empId, from: b.from, to: b.to, slotKey: entry[0] } : null;
+        })
+        .filter(Boolean);
+    },
+    [locked, serverBreaks, dayOf]
+  );
   const floorOf = useCallback(
     (date) => floorCurve(dayOf(date), breaksOf(date), breadAtOf(date)),
     [dayOf, breaksOf, breadAtOf]
@@ -808,13 +847,47 @@ export default function ScheduleDemo() {
     setSelected(null);
   }
 
+  // 직원 한 명을 API의 Employee 형태로 바꾼다 (SPEC.md 5절)
+  function empForApi(e) {
+    return {
+      id: e.id,
+      storeId: e.storeId,
+      name: e.name,
+      kind: e.kind,
+      maxPerWeek: e.maxPerWeek,
+      minPerWeek: e.minPerWeek,
+      maxWeekday: e.maxWeekday ?? null,
+      maxHalf: e.maxHalf,
+      canJjinO: e.canJjinO,
+      until: e.until || null,
+      avail: e.avail || null,
+      fixedDays: e.fixedDays || [],
+      pins: e.pins || {},
+      vacations: e.vacations || [],
+    };
+  }
+
+  // 슬롯 정의 + 규칙 탭에서 바꾼 필요 인원(needs)을 API의 Slot 형태로 바꾼다
+  function slotsForApi() {
+    return ALL_SLOTS.map((s) => ({
+      key: s.key,
+      label: s.label,
+      from: s.from,
+      to: s.to,
+      need: s.half ? 0 : needs[s.key]?.weekday ?? s.need ?? 0,
+      peak: s.half ? 0 : needs[s.key]?.peak ?? (s.peak != null ? s.peak : s.need) ?? 0,
+      extra: s.extra ?? 0,
+      open: !!s.open,
+      late: !!s.late,
+      night: !!s.night,
+      half: !!s.half,
+    }));
+  }
+
   async function runAuto() {
-    // 현재 선택된 매장 + 현재 보고 있는 주만 짠다. 시드를 바꿔가며 아주 여러 번
-    // 짠 뒤 가장 점수가 낮은 것을 고른다. 시도 수가 많아 시간이 좀 걸리므로
-    // 로딩 문구를 먼저 그린 뒤 청크 단위로 나눠 돈다.
+    // 현재 선택된 매장 + 현재 보고 있는 주만 서버(CP-SAT)에 보내 최적해를 받는다.
     setAutoBusy(true);
-    setAutoProgress(0);
-    await new Promise((r) => setTimeout(r, 0));
+    setSolveError(null);
 
     // 이 매장 직원 + 다른 매장의 야간 직원(지원 백업용)까지 포함한다.
     // 신중동처럼 야간 인력이 1명뿐이면 혼자서는 주 7일을 못 채우므로,
@@ -822,63 +895,107 @@ export default function ScheduleDemo() {
     const targetEmployees = employees.filter(
       (e) => e.storeId === storeId || e.kind === "night"
     );
-    let next = null;
-    let best = Infinity;
-    const base = Math.floor(Math.random() * 100000);
-    for (let i = 0; i < AUTO_TRIES; i++) {
-      const cand = autoAssignAll({
-        dates: weekDates,
-        employees: targetEmployees,
-        prevBoard: board,
-        lockMap,
-        shortage,
-        breadWeekday,
-        breadPeak,
-        seed: base + i,
-      });
-      const sc = scoreBoard(cand, weekDates, targetEmployees, breadWeekday, breadPeak);
-      if (sc < best) {
-        best = sc;
-        next = cand;
-      }
-      if (i % AUTO_CHUNK === AUTO_CHUNK - 1) {
-        setAutoProgress(i + 1);
-        await new Promise((r) => setTimeout(r, 0));
-      }
-    }
+    const lockedThisWeek = weekDates.filter((d) => (lockMap[storeId] || {})[d]);
 
-    // 이 매장·이 주 날짜만 갈아끼운다. 다른 매장이나 다른 주에 이미 짜둔
-    // 스케줄은 건드리지 않는다. 다만 다른 매장 야간 직원을 지원으로 빌려 썼다면
-    // 그 매장 쪽 야간 칸에도 반영해서, 나중에 그 매장을 따로 돌릴 때 같은
-    // 사람을 이중으로 넣지 않게 한다(주간 근무 칸은 안 건드림).
-    setBoard((prev) => {
-      const nb = { ...prev };
-      const own = { ...(prev[storeId] || {}) };
+    // 읽기 전용 문맥: 첫날 바로 전날(마감→오픈 판정용), 잠긴 날짜의 실제 배정,
+    // 타 매장의 이번 주 배정(야간 지원 여부 판단·이중 배정 방지용)
+    const existing = {};
+    const own = {};
+    const before = shiftDate(weekDates[0], -1);
+    if (board[storeId]?.[before]) own[before] = board[storeId][before];
+    lockedThisWeek.forEach((d) => {
+      own[d] = (board[storeId] || {})[d] || {};
+    });
+    if (Object.keys(own).length) existing[storeId] = own;
+    STORES.forEach((s) => {
+      if (s.id === storeId) return;
+      const otherWeek = {};
       weekDates.forEach((d) => {
-        own[d] = next[storeId][d] || {};
+        if (board[s.id]?.[d]) otherWeek[d] = board[s.id][d];
       });
-      nb[storeId] = own;
-      STORES.forEach((s) => {
-        if (s.id === storeId) return;
-        const otherDay = { ...(prev[s.id] || {}) };
+      if (Object.keys(otherWeek).length) existing[s.id] = otherWeek;
+    });
+
+    const payload = {
+      storeId,
+      dates: weekDates,
+      employees: targetEmployees.map(empForApi),
+      slots: slotsForApi(),
+      rules: {
+        weekCap: WEEK_CAP,
+        startShared: START_SHARED,
+        floor: { from: FLOOR_FROM, until: FLOOR_UNTIL, min: FLOOR_MIN, ceil: MAX_FLOOR },
+        break: { len: BREAK_LEN, afterStart: tb(2), beforeEnd: 0, concurrent: 1 },
+        bread: { weekday: breadWeekday, peak: breadPeak, len: BREAD_LEN },
+        overtime: { maxExtraShifts: 1, maxExtraUnits: 2 },
+        shortage,
+        requireSlotFill: true,
+      },
+      existing,
+      locked: lockedThisWeek,
+      assumePrevNightCovered: true,
+      timeLimitSec: 30,
+    };
+
+    try {
+      const res = await solveWeek(payload);
+
+      // 이 매장·이 주 날짜만 갈아끼운다(잠긴 날짜는 그대로 둔다). 다른 매장이나
+      // 다른 주에 이미 짜둔 스케줄은 건드리지 않는다. 다만 다른 매장 야간 직원을
+      // 지원으로 빌려 썼다면 그 매장 쪽 야간 칸에도 반영해서, 나중에 그 매장을
+      // 따로 돌릴 때 같은 사람을 이중으로 넣지 않게 한다(주간 근무 칸은 안 건드림).
+      setBoard((prev) => {
+        const nb = { ...prev };
+        const ownNext = { ...(prev[storeId] || {}) };
         weekDates.forEach((d) => {
-          const night = next[s.id]?.[d]?.night || [];
-          otherDay[d] = { ...(otherDay[d] || {}), night };
+          if (lockedThisWeek.includes(d)) return;
+          ownNext[d] = res.board?.[storeId]?.[d] || {};
         });
-        nb[s.id] = otherDay;
+        nb[storeId] = ownNext;
+        STORES.forEach((s) => {
+          if (s.id === storeId) return;
+          const otherDay = { ...(prev[s.id] || {}) };
+          weekDates.forEach((d) => {
+            const night = res.board?.[s.id]?.[d]?.night;
+            if (night) otherDay[d] = { ...(otherDay[d] || {}), night };
+          });
+          nb[s.id] = otherDay;
+        });
+        return nb;
       });
-      return nb;
-    });
-    setAutoMap((prev) => {
-      const store = { ...(prev[storeId] || {}) };
-      weekDates.forEach((d) => {
-        if (!(lockMap[storeId] || {})[d]) store[d] = true;
+      setAutoMap((prev) => {
+        const store = { ...(prev[storeId] || {}) };
+        weekDates.forEach((d) => {
+          if (!lockedThisWeek.includes(d)) store[d] = true;
+        });
+        return { ...prev, [storeId]: store };
       });
-      return { ...prev, [storeId]: store };
-    });
-    setAutoBusy(false);
-    // 요일을 클릭해야 상세가 보인다는 걸 모르는 사용자를 위해 월요일을 미리 열어 보여준다
-    setSelected(weekDates[0]);
+      setServerBreaks((prev) => {
+        const nb = { ...prev };
+        weekDates.forEach((d) => {
+          if (!lockedThisWeek.includes(d)) nb[d] = res.breaks?.[d] || [];
+        });
+        return nb;
+      });
+      setDiagnostics(res.diagnostics || null);
+      setSolveMeta({
+        status: res.status,
+        objective: res.objective,
+        bound: res.bound,
+        wallTimeSec: res.wallTimeSec,
+        warnings: res.warnings || [],
+      });
+      // 요일을 클릭해야 상세가 보인다는 걸 모르는 사용자를 위해 월요일을 미리 열어 보여준다
+      setSelected(weekDates[0]);
+    } catch (e) {
+      if (e instanceof SolveError && e.kind === "infeasible") {
+        setSolveError([e.message, ...(e.detail || [])].join("\n"));
+      } else {
+        setSolveError(e?.message || String(e));
+      }
+    } finally {
+      setAutoBusy(false);
+    }
   }
 
   function clearAll() {
@@ -1470,6 +1587,15 @@ export default function ScheduleDemo() {
       {/* 근무표 */}
       {tab === "board" && (
         <div className="px-4 pb-8">
+          {serverOk === false && (
+            <div
+              className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
+              style={{ background: ALERT, color: PAPER }}
+            >
+              계산 서버가 꺼져 있습니다. backend 폴더에서 uvicorn을 실행해 주세요.
+            </div>
+          )}
+
           <div className="mt-3 flex gap-2">
             <button
               onClick={runAuto}
@@ -1488,7 +1614,7 @@ export default function ScheduleDemo() {
                     className="h-3 w-3 animate-spin rounded-full"
                     style={{ border: `2px solid ${PAPER}`, borderTopColor: "transparent" }}
                   />
-                  스케줄 짜는 중… ({autoProgress}/{AUTO_TRIES})
+                  계산 중…
                 </span>
               ) : (
                 `이번 주 자동으로 짜기 (${storeName(storeId)})`
@@ -1505,6 +1631,37 @@ export default function ScheduleDemo() {
               </button>
             )}
           </div>
+
+          {solveError && (
+            <div
+              className="mt-2 whitespace-pre-line rounded-md px-3 py-2 text-xs leading-relaxed"
+              style={{ background: "#F5EAD6", color: "#7A5A18" }}
+            >
+              {solveError}
+            </div>
+          )}
+
+          {diagnostics && solveMeta && (
+            <details className="mt-2 rounded-md px-3 py-2 text-xs" style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}>
+              <summary className="cursor-pointer font-medium" style={{ color: INK }}>
+                {solveMeta.status === "OPTIMAL" ? "최적해" : solveMeta.status === "TIMEOUT" ? "근사해" : solveMeta.status}
+                {" "}({Math.round(solveMeta.objective ?? 0)}점) · {solveMeta.wallTimeSec.toFixed(1)}초
+              </summary>
+              <div className="mt-1 leading-relaxed">
+                형평 {Math.round(diagnostics.penalties.fairness)} · 부족 {Math.round(diagnostics.penalties.gap)} ·
+                {" "}부족일수 {Math.round(diagnostics.penalties.gapDays)} · 바인원 {Math.round(diagnostics.penalties.floor)} ·
+                {" "}과잉 {Math.round(diagnostics.penalties.over)} · 최소근무 {Math.round(diagnostics.penalties.minWeek)} ·
+                {" "}초과근무 {Math.round(diagnostics.penalties.overtime)}
+              </div>
+              {solveMeta.warnings.length > 0 && (
+                <div className="mt-1 leading-relaxed" style={{ color: "#7A5A18" }}>
+                  {solveMeta.warnings.map((w, i) => (
+                    <div key={i}>· {w}</div>
+                  ))}
+                </div>
+              )}
+            </details>
+          )}
 
           {view === "week" && hasSchedule && (
             <button
@@ -2208,6 +2365,28 @@ export default function ScheduleDemo() {
                           }
                         >
                           {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 text-xs" style={{ color: MUTED }}>
+                      평일 최대
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {[null, 2, 3, 4, 5].map((n) => (
+                        <button
+                          key={n ?? "off"}
+                          onClick={() => patchEmp(e.id, { maxWeekday: n })}
+                          className="h-8 flex-1 rounded font-mono text-xs active:opacity-60"
+                          style={
+                            (e.maxWeekday ?? null) === n
+                              ? { background: INK, color: PAPER }
+                              : { border: `1px solid ${RULE}`, color: MUTED }
+                          }
+                        >
+                          {n ?? "제한없음"}
                         </button>
                       ))}
                     </div>

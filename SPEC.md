@@ -146,7 +146,9 @@ server: { proxy: { "/api": "http://localhost:8000" } }
   "weights": {
     "gapWeekday": 1, "gapPeak": 4, "gapDay": 20,
     "floor": 2, "over": 1.5,
-    "fairness": 100, "minWeek": 500, "overtime": 180
+    "fairness": 100, "minWeek": 500, "overtime": 180,
+    "peakFloorShort": 6, "peakFloorPref3": 1,
+    "weekendExtraSun": 3, "weekendExtraSat": 2, "weekendExtraFri": 1
   },
 
   "existing": {                          // 읽기 전용 문맥. 배정 대상 아님
@@ -247,6 +249,11 @@ def solve(req: SolveRequest) -> SolveResponse: ...
 | `shortage` | `"leave"`면 extra·half 슬롯 상한을 0으로 (평일만) |
 | `canEightStart` | false면 8시 시작 슬롯(from이 8시인 슬롯 전부, half 포함) 전체에 대해 x 변수 미생성 |
 | `familyStartCap` | 오전(9/10시 시작)·오후(12/13시 시작) 슬롯을 각각 계열로 묶어 직원별 주당 합을 이 값 이하로 제한 |
+| `maxWeekday` | 월~금(피크 여부 무관) 출근 횟수 상한. 수요 계산의 `is_peak`(금토일)과는 별개 개념 |
+| 쩜오 순서 | half를 하나라도 쓰려면 그 직원의 풀타임 출근 횟수가 이미 `min(maxPerWeek, weekCap)`에 도달해 있어야 함 (하드) |
+| 마감-오픈-마감 | 캘린더 인접일이 아니라 그 직원이 실제로 근무한 바로 전/다음 날 기준으로 검사 (쉬는 날 스킵) |
+| 금토일 12~17시 | 기존 floor(11~17, 요일 무관)와 별개로 `peakFloorShort`/`peakFloorPref3` 소프트 가중치를 추가로 얹음 |
+| 일>토>금 여유 배치 | 월~목보다 일/토/금에 여유 인력을 더 배치하도록 `weekendExtraSun/Sat/Fri`로 목적함수에 작은 보상을 더함 (소프트) |
 
 ### 6.2 슬롯 그룹 배타 제약의 일반화
 

@@ -242,6 +242,7 @@ def solve(req: SolveRequest) -> SolveResponse:
 
     locked_units = defaultdict(int)
     locked_shift_count = defaultdict(int)
+    locked_half_count = defaultdict(int)
     for d_str in locked_set:
         day_data = existing_day(req.storeId, d_str)
         for key, ids in day_data.items():
@@ -255,6 +256,8 @@ def solve(req: SolveRequest) -> SolveResponse:
                     continue
                 locked_units[ei] += u
                 locked_shift_count[ei] += 1
+                if s["half"]:
+                    locked_half_count[ei] += 1
 
     load, shift_count = {}, {}
     for ei, e in enumerate(EMP):
@@ -271,10 +274,16 @@ def solve(req: SolveRequest) -> SolveResponse:
         shift_count[ei] = cv
         m.Add(cv <= min(e["maxw"] + req.rules.overtime.maxExtraShifts, week_cap))
 
-    # ---------- 4.5 평일(비피크) 전용 상한 ----------
+    # ---------- 4.5 평일 전용 상한 ----------
+    # 여기서 "평일"은 수요 계산에 쓰는 is_peak(금토일=피크)과는 별개로 월~금이다.
+    # 배정서처럼 maxWeekday가 걸린 직원은 금요일도 평일로 쳐서 상한에 넣는다 —
+    # 예: 월/수/목(비피크 3) + 금(피크 1) = 4일이 되는 걸 막기 위함.
+    def is_mon_fri(d_str):
+        return weekday_of(d_str) < 5
+
     locked_weekday_count = defaultdict(int)
     for d_str in locked_set:
-        if is_peak(d_str):
+        if not is_mon_fri(d_str):
             continue
         for _key, ids in existing_day(req.storeId, d_str).items():
             for emp_id in ids:
@@ -285,7 +294,7 @@ def solve(req: SolveRequest) -> SolveResponse:
     for ei, e in enumerate(EMP):
         if e["maxweekday"] is None:
             continue
-        terms = [v for (eei, di, _key), v in x.items() if eei == ei and not is_peak(dates[di])]
+        terms = [v for (eei, di, _key), v in x.items() if eei == ei and is_mon_fri(dates[di])]
         wv = m.NewIntVar(0, req.rules.weekCap, f"weekdaycount{ei}")
         m.Add(wv == sum(terms) + locked_weekday_count[ei])
         m.Add(wv <= e["maxweekday"])
@@ -317,6 +326,29 @@ def solve(req: SolveRequest) -> SolveResponse:
             if not terms:
                 continue
             m.Add(sum(terms) + locked_family_count[fam][ei] <= req.rules.familyStartCap)
+
+    # ---------- 4.7 쩜오는 정규 근무일수를 다 채운 뒤에만 ----------
+    # 쩜오(half)를 하나라도 쓰려면, 그 직원의 풀타임(찐/오픈/마감 등 half가 아닌) 출근
+    # 횟수가 이미 정규 상한(min(maxw, weekCap))에 도달해 있어야 한다. 4.5/5처럼 정규
+    # 상한을 못 채운 채 쩜오로 대충 채우는 걸 막고, 쩜오는 상한을 다 채운 뒤 초과분으로만
+    # 쓰이게 한다.
+    for ei, e in enumerate(EMP):
+        half_terms = [
+            X(ei, di, key) for di in range(D) for key, s in SLOTS.items()
+            if s["half"] and X(ei, di, key) is not None
+        ]
+        if not half_terms:
+            continue
+        full_terms = [
+            X(ei, di, key) for di in range(D) for key, s in SLOTS.items()
+            if not s["half"] and not s["night"] and X(ei, di, key) is not None
+        ]
+        half_expr = sum(half_terms) + locked_half_count[ei]
+        full_expr = sum(full_terms) + (locked_shift_count[ei] - locked_half_count[ei])
+        cap = min(e["maxw"], req.rules.weekCap)
+        has_half = m.NewBoolVar(f"hashalf{ei}")
+        m.Add(half_expr <= D * has_half)
+        m.Add(full_expr >= cap).OnlyEnforceIf(has_half)
 
     # ---------- 5. 주 최소 근무 (미달 시 벌점) ----------
     minw_short = {}
@@ -400,6 +432,11 @@ def solve(req: SolveRequest) -> SolveResponse:
 
     prev_date = shift_date(dates[0], -1) if dates else None
     OP, LA, LA_prev = {}, {}, {}
+    # 그 날 무슨 자리든 하나라도 서면 근무일로 본다 (쉬는 날 판정용, 마감-오픈-마감을
+    # 캘린더 인접일이 아니라 실제 근무일 인접으로 일반화하는 데 쓴다).
+    ALL_DAY_K = [k for k, s in SLOTS.items() if not s["night"]]
+    WORKED = {}
+
     for ei, e in enumerate(EMP):
         if e["kind"] == "night":
             continue
@@ -410,9 +447,20 @@ def solve(req: SolveRequest) -> SolveResponse:
                 day_data = existing_day(req.storeId, d_str)
                 OP[ei, di] = any_of_const(e["id"], day_data, OPEN_K)
                 LA[ei, di] = any_of_const(e["id"], day_data, LATE_K)
+                WORKED[ei, di] = any_of_const(e["id"], day_data, ALL_DAY_K)
             else:
                 OP[ei, di] = any_of_var(ei, di, OPEN_K, "op")
                 LA[ei, di] = any_of_var(ei, di, LATE_K, "la")
+                WORKED[ei, di] = any_of_var(ei, di, ALL_DAY_K, "wk")
+
+    def chain_step(prev_active, worked, la, tag):
+        """worked면 이 날의 la로 갱신, 쉬는 날이면 prev_active를 그대로 이어간다."""
+        if isinstance(worked, int):
+            return la if worked else prev_active
+        nxt = m.NewBoolVar(tag)
+        m.Add(nxt == la).OnlyEnforceIf(worked)
+        m.Add(nxt == prev_active).OnlyEnforceIf(worked.Not())
+        return nxt
 
     for ei, e in enumerate(EMP):
         if e["kind"] == "night":
@@ -422,10 +470,24 @@ def solve(req: SolveRequest) -> SolveResponse:
             clo_terms.append(mul_bool(LA[ei, di], OP[ei, di + 1], f"clo{ei}_{di}"))
         if clo_terms:
             m.Add(sum(clo_terms) <= 1)
+
+        if D == 0:
+            continue
+        # 마감-오픈-마감 금지: 캘린더상 바로 옆날이 아니라, 쉬는 날을 건너뛰고 그 직원이
+        # 실제로 일한 바로 전날/다음날을 기준으로 같은 걸 검사한다. 마감→(휴무)→오픈→
+        # (휴무)→마감처럼 반복되는 것도 생활 리듬이 흔들리므로 막아야 하기 때문이다.
+        prev_active = {0: LA_prev[ei]}
+        for di in range(D - 1):
+            prev_active[di + 1] = chain_step(
+                prev_active[di], WORKED[ei, di], LA[ei, di], f"pla{ei}_{di + 1}"
+            )
+        next_active = {D - 1: 0}
+        for di in range(D - 2, -1, -1):
+            next_active[di] = chain_step(
+                next_active[di + 1], WORKED[ei, di + 1], LA[ei, di + 1], f"nla{ei}_{di}"
+            )
         for di in range(D):
-            la_before = LA_prev[ei] if di == 0 else LA[ei, di - 1]
-            la_after = LA[ei, di + 1] if di + 1 < D else 0
-            m.Add(sum([la_before, OP[ei, di], la_after]) <= 2)
+            m.Add(sum([prev_active[di], OP[ei, di], next_active[di]]) <= 2)
 
     # ---------- 10. 휴게 시각 (결정변수) ----------
     br = req.rules.break_
@@ -551,6 +613,28 @@ def solve(req: SolveRequest) -> SolveResponse:
                 m.Add(ov >= fe - ceil)
             over_terms.append(ov)
 
+    # ---------- 12.5 금토일 12~17시 바 인원 강화 ----------
+    # 기존 floor(11~17, 요일 무관, min 2)와 별개로 얹는다. 금토일 점심~초저녁은 2명
+    # 미만이면 floor보다 훨씬 강하게 페널티를 주고, 2명이어도 3명이면 더 좋다는 완만한
+    # 유도(3명 미만 소액 페널티)를 추가한다. floor_expr는 12절에서 정의한 걸 그대로 쓴다.
+    PEAK_FLOOR_FROM, PEAK_FLOOR_UNTIL = tb(12), tb(17)
+    peak_floor_short, peak_floor_pref3 = [], []
+    for di, d_str in enumerate(dates):
+        if not is_peak(d_str):
+            continue
+        for t in range(PEAK_FLOOR_FROM, PEAK_FLOOR_UNTIL):
+            fe = floor_expr(di, t, bd.peak)
+            if isinstance(fe, int):
+                sv2 = max(0, 2 - fe)
+                sv3 = max(0, 3 - fe)
+            else:
+                sv2 = m.NewIntVar(0, 2, f"pfs2_{di}_{t}")
+                m.Add(sv2 >= 2 - fe)
+                sv3 = m.NewIntVar(0, 3, f"pfs3_{di}_{t}")
+                m.Add(sv3 >= 3 - fe)
+            peak_floor_short.append(sv2)
+            peak_floor_pref3.append(sv3)
+
     # ---------- 13. 형평 (max-min) ----------
     home_ids = [ei for ei, e in enumerate(EMP) if e["storeId"] == req.storeId]
     if home_ids:
@@ -578,16 +662,31 @@ def solve(req: SolveRequest) -> SolveResponse:
         m.Add(ov >= 0)
         overtime_units[ei] = ov
 
-    # ---------- 목적함수 ----------
+    # ---------- 14.5 월~목 다 채우고 남는 여유를 일>토>금 순으로 ----------
+    # 필요 인원을 다 채우고도 남는 선택의 여지(추가/여유 자리, 쩜오 포함)가 있을 때
+    # 일>토>금 순으로 더 배치되길 바란다는 요청을 목적함수의 작은 보상(음수 비용)으로
+    # 반영한다. 다른 항(커버리지·형평·초과근무)보다 훨씬 작게 잡아, 그 항들의 우선순위를
+    # 뒤엎지 않고 동률 상황의 타이브레이커로만 작동하게 한다. 야간은 대상 밖.
     w = req.weights
+    WEEKEND_EXTRA_W = {6: w.weekendExtraSun, 5: w.weekendExtraSat, 4: w.weekendExtraFri}
+    weekend_extra_terms = []
+    for (eei, di, key), v in x.items():
+        wt = WEEKEND_EXTRA_W.get(weekday_of(dates[di]))
+        if wt and not SLOTS[key]["night"]:
+            weekend_extra_terms.append((v, wt))
+
+    # ---------- 목적함수 ----------
     obj = []
     obj += [int(round(wt * BUCKET)) * g for g, wt in gap_terms]
     obj += [int(round(w.gapDay)) * b for b in day_has_gap]
     obj += [int(round(w.floor * BUCKET)) * s for s in floor_short]
     obj += [int(round(w.over * BUCKET)) * o for o in over_terms]
+    obj += [int(round(w.peakFloorShort * BUCKET)) * s for s in peak_floor_short]
+    obj += [int(round(w.peakFloorPref3 * BUCKET)) * s for s in peak_floor_pref3]
     obj.append(int(round(w.fairness)) * rng)
     obj += [int(round(w.minWeek)) * s for s in minw_short.values()]
     obj += [int(round(w.overtime)) * ov for ov in overtime_units.values()]
+    obj += [-int(round(wt)) * v for v, wt in weekend_extra_terms]
     m.Minimize(sum(obj))
 
     # ---------- 풀기 ----------
@@ -687,6 +786,11 @@ def solve(req: SolveRequest) -> SolveResponse:
         fairness=int(round(w.fairness)) * _val(solver, rng),
         minWeek=sum(int(round(w.minWeek)) * _val(solver, s) for s in minw_short.values()),
         overtime=sum(int(round(w.overtime)) * _val(solver, ov) for ov in overtime_units.values()),
+        peakFloor=(
+            sum(int(round(w.peakFloorShort * BUCKET)) * _val(solver, s) for s in peak_floor_short)
+            + sum(int(round(w.peakFloorPref3 * BUCKET)) * _val(solver, s) for s in peak_floor_pref3)
+        ),
+        weekendExtra=sum(-int(round(wt)) * _val(solver, v) for v, wt in weekend_extra_terms),
     )
 
     diagnostics = Diagnostics(perDay=per_day, perEmployee=per_emp, penalties=penalties)

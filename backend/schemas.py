@@ -99,10 +99,12 @@ class Weights(BaseModel):
     peakFloorShort: float = 6   # 이 시간대 2명 미만이면 분당 추가 페널티
     peakFloorPref3: float = 1   # 이 시간대 3명 미만이면 분당 완만한 추가 페널티 (3명 유도)
     # 월~목을 다 채우고 남는 여유 인력을 일>토>금 순으로 배치하도록 하는 보상 (건당).
-    # 다른 항보다 훨씬 작게 잡아 동률 상황의 타이브레이커로만 쓰인다.
-    weekendExtraSun: float = 3
-    weekendExtraSat: float = 2
-    weekendExtraFri: float = 1
+    # underWeek가 남는 여력을 어딘가에 채우도록 밀어붙이는 이상, 그 "어디"를 정하는
+    # 이 항도 over(과잉 인원) 페널티 차이를 이길 만큼 충분히 세야 한다. 너무 작으면
+    # (예: 1~3점) 요일 간 과잉 페널티 차이에 묻혀 평일로 새 버린다.
+    weekendExtraSun: float = 150
+    weekendExtraSat: float = 100
+    weekendExtraFri: float = 50
     # 개인 상한을 다 못 채운 채 남는 여력에 대한 페널티 (0.5일 단위). 형평만으로는
     # 상한까지 채우도록 밀어주지 않아서 따로 둔다. over(과잉 인원) 페널티보다 충분히
     # 세게 잡아야, 이미 커버된 시간대에 여유 인력을 더 넣는 걸 주저하지 않는다.

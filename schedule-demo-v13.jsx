@@ -69,6 +69,25 @@ function startTaken(day, slot) {
   );
 }
 
+// 같은 from에 길이가 다른 대체 슬롯이 여럿(half 제외, 예: 찐오 8-18 / 이른오전
+// 8-15)이면 그중 가장 긴 슬롯을 할 수 있는 사람은 짧은 쪽을 못 고르게 한다.
+// 이른오전 같은 짧은 자리는 avail로 그만큼만 묶인 사람(배정서 등) 전용이다.
+const LONGER_IN_GROUP = {};
+{
+  const byFrom = {};
+  ALL_SLOTS.forEach((s) => {
+    if (s.half) return;
+    (byFrom[s.from] = byFrom[s.from] || []).push(s);
+  });
+  Object.values(byFrom).forEach((group) => {
+    if (group.length < 2) return;
+    const longest = group.reduce((a, b) => (b.to > a.to ? b : a));
+    group.forEach((s) => {
+      if (s.key !== longest.key) LONGER_IN_GROUP[s.key] = longest.key;
+    });
+  });
+}
+
 const WEEK_CAP = 6; // 어떤 경우에도 주 6일을 넘길 수 없다
 // 자동 배정 시 여러 시드로 시도해 보고 가장 점수 낮은 걸 고른다.
 // 1000회는 시작점(무작위 시드 기준점)에 따라 가끔 더 나쁜 결과에 걸렸다
@@ -1318,6 +1337,8 @@ export default function ScheduleDemo() {
       if (e.until && date > e.until) return false;
       if (slot.from === tb(8) && !slot.night && !e.canEightStart) return false;
       if (!canWork(e, slot, date)) return false;
+      const longer = LONGER_IN_GROUP[slot.key];
+      if (longer && canWork(e, slotInfo(longer), date)) return false;
       if (busy.has(e.id) || elsewhere.has(e.id)) return false;
       if (e.vacations.includes(date)) return false;
       return true;

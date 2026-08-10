@@ -828,6 +828,8 @@ export default function ScheduleDemo() {
     });
     setAutoMap(marks);
     setAutoBusy(false);
+    // 요일을 클릭해야 상세가 보인다는 걸 모르는 사용자를 위해 월요일을 미리 열어 보여준다
+    setSelected(weekDates[0]);
   }
 
   function clearAll() {
@@ -1425,14 +1427,15 @@ export default function ScheduleDemo() {
                     {weekDates.map((d) => {
                       const peak = isPeak(d);
                       const isSel = selected === d;
+                      const short = hasSchedule && gapMinOf(d) > 0;
                       return (
                         <button
                           key={d}
                           onClick={() => setSelected(isSel ? null : d)}
                           className="rounded-t py-1 active:opacity-60"
                           style={{
-                            background: isSel ? INK : peak ? "#E4E1D8" : "transparent",
-                            color: isSel ? PAPER : INK,
+                            background: isSel ? INK : short ? "#F7E6E1" : peak ? "#E4E1D8" : "transparent",
+                            color: isSel ? PAPER : short ? ALERT : INK,
                           }}
                         >
                           <div className="font-mono text-[10px] font-semibold">

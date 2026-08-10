@@ -560,42 +560,30 @@ def solve(req: SolveRequest) -> SolveResponse:
         for di in range(D):
             m.Add(sum([prev_active[di], OP[ei, di], next_active[di]]) <= 2)
 
-    # ---------- 10. 휴게 시각 (결정변수) ----------
+    # ---------- 10. 휴게 시각 (고정 규칙: 오픈은 12:30부터, 마감은 15:30부터, 순서대로) ----------
+    # 예전엔 CP-SAT가 바 인원 미달을 피하려고 휴게 시각을 자유롭게 골랐지만, 이제는
+    # "오픈(8/9시)은 12:30부터, 마감(12/13시)은 15:30부터, 출근 순서대로 한 명씩 이어서"라는
+    # 확정된 규칙으로 못박는다 — 8시가 12:30부터, 9시(짭오)가 그 뒤(13:30부터), 12시(마감)가
+    # 15:30부터, 13시가 그 뒤(16:30부터). 8시 그룹(찐오/이른오전)은 어차피 하루에 하나만
+    # 쓰이므로(3절 배타 제약) 같은 시작 창을 써도 겹치지 않는다. 미들(10시)·쩜오·야간은
+    # 휴게를 돌지 않는다. 이 표는 그날 그 자리에 누가 있든 고정이라 별도 결정변수도,
+    # 동시성 제약도 필요 없다 — floor_expr(12절)에서 slot_count를 그대로 빼면 된다.
     br = req.rules.break_
     BREAK_LEN = br.len
-    FULL_DAY = [k for k, s in SLOTS.items() if not s["night"] and not s["half"]]
-
-    brk = {}
-    for ei, e in enumerate(EMP):
-        if e["kind"] == "night":
+    OPEN_BREAK_AT = tb(12, 30)
+    LATE_BREAK_AT = tb(15, 30)
+    BREAK_WINDOW = {}
+    for key, s in SLOTS.items():
+        if s["night"] or s["half"]:
             continue
-        for di, d_str in enumerate(dates):
-            if d_str in locked_set:
-                continue  # 서버가 잠금일 휴게는 계산하지 않는다 (7.3: 프론트가 breakPlan으로 대체)
-            avail_t = defaultdict(list)
-            for key in FULL_DAY:
-                v = X(ei, di, key)
-                if v is None:
-                    continue
-                s = SLOTS[key]
-                for t in range(s["frm"] + br.afterStart, s["to"] - BREAK_LEN - br.beforeEnd + 1):
-                    avail_t[t].append(key)
-            if not avail_t:
-                continue
-            for t, keys in avail_t.items():
-                b = m.NewBoolVar(f"b{ei}_{di}_{t}")
-                brk[ei, di, t] = b
-                m.Add(b <= sum(X(ei, di, k) for k in keys))
-            full = [X(ei, di, k) for k in FULL_DAY if X(ei, di, k) is not None]
-            m.Add(sum(brk[ei, di, t] for t in avail_t) == sum(full))
-
-    for di, d_str in enumerate(dates):
-        if d_str in locked_set:
-            continue
-        for t in range(BPD):
-            on = [b for (ei, dd, st), b in brk.items() if dd == di and st <= t < st + BREAK_LEN]
-            if len(on) > br.concurrent:
-                m.Add(sum(on) <= br.concurrent)
+        if s["frm"] == tb(8):
+            BREAK_WINDOW[key] = OPEN_BREAK_AT
+        elif s["frm"] == tb(9):
+            BREAK_WINDOW[key] = OPEN_BREAK_AT + BREAK_LEN
+        elif s["frm"] == tb(12):
+            BREAK_WINDOW[key] = LATE_BREAK_AT
+        elif s["frm"] == tb(13):
+            BREAK_WINDOW[key] = LATE_BREAK_AT + BREAK_LEN
 
     # ---------- 11. 커버리지 부족 ----------
     def cover_expr(di, t):
@@ -663,9 +651,9 @@ def solve(req: SolveRequest) -> SolveResponse:
             terms.append(slot_count(di, key))
         out = sum(terms) if terms else 0
         if d_str not in locked_set:
-            off = [b for (ei, dd, st), b in brk.items() if dd == di and st <= t < st + BREAK_LEN]
-            if off:
-                out = out - sum(off)
+            for key, window_start in BREAK_WINDOW.items():
+                if window_start <= t < window_start + BREAK_LEN:
+                    out = out - slot_count(di, key)
         if bread <= t < bread + bd.len:
             out = out - 1
         return out
@@ -899,9 +887,14 @@ def solve(req: SolveRequest) -> SolveResponse:
                 board.setdefault(e["storeId"], {}).setdefault(d_str, {}).setdefault("night", []).append(e["id"])
 
     breaks = defaultdict(list)
-    for (ei, di, t), b in brk.items():
-        if solver.Value(b):
-            breaks[dates[di]].append({"empId": EMP[ei]["id"], "from": t, "to": t + BREAK_LEN})
+    for di, d_str in enumerate(dates):
+        if d_str in locked_set:
+            continue
+        for key, window_start in BREAK_WINDOW.items():
+            ids = [EMP[ei]["id"] for ei in range(E)
+                   if X(ei, di, key) is not None and solver.Value(X(ei, di, key))]
+            for emp_id in ids:
+                breaks[d_str].append({"empId": emp_id, "from": window_start, "to": window_start + BREAK_LEN})
 
     # ---------- 진단 ----------
     per_day = []

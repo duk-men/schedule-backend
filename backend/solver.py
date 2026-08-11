@@ -10,6 +10,7 @@ roster.py 대비 추가된 것:
   - requireSlotFill (9.1에서 true로 확정)
   - fixedDays 하드 제약 + 배정 불가능시 명시적 INFEASIBLE (9.2에서 확정)
 """
+import math
 import time
 from collections import defaultdict
 
@@ -113,6 +114,10 @@ def solve(req: SolveRequest) -> SolveResponse:
         EMP.append(dict(
             id=e.id, name=e.name, storeId=e.storeId, kind=e.kind,
             maxw=e.maxPerWeek, minw=e.minPerWeek, maxweekday=e.maxWeekday, maxhalf=e.maxHalf,
+            # 초과근무 가능일수(0.5일 단위)를 단위(unit)·출근횟수(shift) 상한으로 변환.
+            # unit은 정확히 2배(1일=2단위), shift는 올림 — 쩜오 하나(0.5일)짜리 초과도
+            # 출근 횟수로는 1회이므로. 그대로면 이전 전역 규칙(+1회/+2단위)과 동일해진다.
+            extra_units=round(e.overtimeDays * 2), extra_shifts=math.ceil(e.overtimeDays - 1e-9),
             eightstart=e.canEightStart, rookie=e.isRookie, until=e.until, avail=e.avail,
             fixed=set(e.fixedDays), pins=e.pins, vacations=set(e.vacations),
         ))
@@ -334,16 +339,16 @@ def solve(req: SolveRequest) -> SolveResponse:
     for ei, e in enumerate(EMP):
         week_cap = req.rules.weekCap
         terms = [unit(k[2]) * v for k, v in x.items() if k[0] == ei]
-        lv = m.NewIntVar(0, 2 * week_cap + max(0, req.rules.overtime.maxExtraUnits), f"load{ei}")
+        lv = m.NewIntVar(0, 2 * week_cap + max(0, e["extra_units"]), f"load{ei}")
         m.Add(lv == sum(terms) + locked_units[ei])
         load[ei] = lv
-        m.Add(lv <= 2 * min(e["maxw"], week_cap) + req.rules.overtime.maxExtraUnits)
+        m.Add(lv <= 2 * min(e["maxw"], week_cap) + e["extra_units"])
 
         cterms = [v for k, v in x.items() if k[0] == ei]
         cv = m.NewIntVar(0, week_cap, f"shiftcount{ei}")
         m.Add(cv == sum(cterms) + locked_shift_count[ei])
         shift_count[ei] = cv
-        m.Add(cv <= min(e["maxw"] + req.rules.overtime.maxExtraShifts, week_cap))
+        m.Add(cv <= min(e["maxw"] + e["extra_shifts"], week_cap))
 
     # ---------- 4.5 평일 전용 상한 ----------
     # 여기서 "평일"은 수요 계산에 쓰는 is_peak(금토일=피크)과는 별개로 월~금이다.
@@ -750,7 +755,7 @@ def solve(req: SolveRequest) -> SolveResponse:
     # ---------- 13. 형평 (max-min) ----------
     home_ids = [ei for ei, e in enumerate(EMP) if e["storeId"] == req.storeId]
     if home_ids:
-        cap_hi = 2 * req.rules.weekCap + max(0, req.rules.overtime.maxExtraUnits)
+        cap_hi = 2 * req.rules.weekCap + max([0] + [EMP[ei]["extra_units"] for ei in home_ids])
         lmax = m.NewIntVar(0, cap_hi, "lmax")
         lmin = m.NewIntVar(0, cap_hi, "lmin")
         m.AddMaxEquality(lmax, [load[ei] for ei in home_ids])

@@ -327,6 +327,9 @@ const mk = (storeId, name, opt = {}) => ({
   minPerWeek: opt.minPerWeek ?? 0,
   maxWeekday: opt.maxWeekday ?? null, // 평일(비피크)만 따로 거는 상한. null이면 제한 없음
   maxHalf: opt.maxHalf ?? 4,
+  // 정규 상한을 넘어 추가로 일할 수 있는 날 수 (0.5일 단위, 쩜오/풀타임 하루 모두 포함).
+  // 이전에는 모든 직원에게 똑같이 적용되는 전역 규칙이었으나 직원별 항목으로 대체.
+  overtimeDays: opt.overtimeDays ?? 1,
   canEightStart: opt.canEightStart ?? true, // 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
   isRookie: opt.isRookie ?? false, // 신입 여부. 신입 둘이 같은 날 오픈조(8시+9시)를 못 나눠 맡음
   until: opt.until || null,
@@ -389,6 +392,7 @@ function empToDb(e) {
     min_per_week: e.minPerWeek,
     max_weekday: e.maxWeekday,
     max_half: e.maxHalf,
+    overtime_days: e.overtimeDays,
     can_eight_start: e.canEightStart,
     is_rookie: e.isRookie,
     until: e.until,
@@ -408,6 +412,7 @@ function empFromDb(r) {
     minPerWeek: r.min_per_week,
     maxWeekday: r.max_weekday,
     maxHalf: r.max_half,
+    overtimeDays: r.overtime_days ?? 1,
     canEightStart: r.can_eight_start,
     isRookie: r.is_rookie || false,
     until: r.until,
@@ -961,8 +966,7 @@ function SnapshotRules({ rules, needs }) {
       <div className="rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
         <div className="text-sm font-semibold">연속 근무·휴게·빵</div>
         <div className="mt-2 font-mono text-[11px] leading-relaxed" style={{ color: MUTED }}>
-          주 근무일 상한 {rules.weekCap}일 · 초과근무 허용 +{rules.overtime?.maxExtraShifts}회 / +
-          {rules.overtime?.maxExtraUnits}단위
+          주 근무일 상한 {rules.weekCap}일 (초과근무 가능일수는 직원별로 다름 — 직원 탭 참고)
           <br />
           바 인원 기준 {rules.floor?.from != null ? bucketLabel(rules.floor.from) : "-"}~
           {rules.floor?.until != null ? bucketLabel(rules.floor.until) : "-"} 최소 {rules.floor?.min}명
@@ -1272,6 +1276,7 @@ export default function ScheduleDemo() {
       minPerWeek: e.minPerWeek,
       maxWeekday: e.maxWeekday ?? null,
       maxHalf: e.maxHalf,
+      overtimeDays: e.overtimeDays,
       canEightStart: e.canEightStart,
       isRookie: e.isRookie,
       until: e.until || null,
@@ -1345,7 +1350,7 @@ export default function ScheduleDemo() {
         // API 호환을 위해 형식만 유지한다 — 실제로 의미 있는 건 len뿐이다.
         break: { len: BREAK_LEN, afterStart: 0, beforeEnd: 0, concurrent: 1 },
         bread: { weekday: breadWeekday, peak: breadPeak, len: BREAD_LEN },
-        overtime: { maxExtraShifts: 1, maxExtraUnits: 2 },
+        // 초과근무 가능일수는 이제 직원별 항목(overtimeDays, empForApi)으로 보낸다.
         shortage,
         requireSlotFill: true,
       },
@@ -2782,9 +2787,6 @@ export default function ScheduleDemo() {
                       style={e.canEightStart ? { background: FILLED, color: PAPER } : { border: `1px solid ${RULE}` }}
                     >
                       <span className="text-sm font-medium">8시 시작 가능</span>
-                      <span className="font-mono text-[11px]" style={{ color: e.canEightStart ? PAPER : MUTED }}>
-                        쩜오 {st.half}회 누적
-                      </span>
                     </button>
                   )}
 
@@ -2892,6 +2894,28 @@ export default function ScheduleDemo() {
                           }
                         >
                           {n ?? "제한없음"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-16 text-xs" style={{ color: MUTED }}>
+                      초과근무
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {[0, 0.5, 1, 1.5, 2].map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => patchEmp(e.id, { overtimeDays: n })}
+                          className="h-8 flex-1 rounded font-mono text-xs active:opacity-60"
+                          style={
+                            (e.overtimeDays ?? 1) === n
+                              ? { background: INK, color: PAPER }
+                              : { border: `1px solid ${RULE}`, color: MUTED }
+                          }
+                        >
+                          {n}
                         </button>
                       ))}
                     </div>

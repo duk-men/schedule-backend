@@ -116,6 +116,7 @@ server: { proxy: { "/api": "http://localhost:8000" } }
       "maxPerWeek": 5,                  // 출근 횟수 상한
       "minPerWeek": 0,                  // 출근 횟수 하한
       "maxHalf": 4,
+      "overtimeDays": 1,                // 정규 상한을 넘어 추가로 일할 수 있는 날 수 (0.5일 단위)
       "canEightStart": true,             // 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
       "until": null,                    // "YYYY-MM-DD" 또는 null
       "avail": { "weekday": null, "peak": [16, 30] },   // [시작버킷, 종료버킷]
@@ -137,7 +138,6 @@ server: { proxy: { "/api": "http://localhost:8000" } }
     "floor":  { "from": 22, "until": 34, "min": 2, "ceil": 3 },
     "break":  { "len": 2, "afterStart": 4, "beforeEnd": 2, "concurrent": 1 },
     "bread":  { "weekday": 32, "peak": 35, "len": 1 },
-    "overtime": { "maxExtraShifts": 1, "maxExtraUnits": 2 },
     "shortage": "both",                 // "leave" | "half" | "extra" | "both"
     "requireSlotFill": false,           // 6절 미결정 항목 참고
     "familyStartCap": 3                 // 오전(9/10시)·오후(12/13시) 계열 각각 주당 최대 출근 횟수
@@ -254,6 +254,7 @@ def solve(req: SolveRequest) -> SolveResponse: ...
 | `familyStartCap` | 오전(9/10시 시작)·오후(12/13시 시작) 슬롯을 각각 계열로 묶어 직원별 주당 합을 이 값 이하로 제한 |
 | `maxWeekday` | 월~금(피크 여부 무관) 출근 횟수 상한. 수요 계산의 `is_peak`(금토일)과는 별개 개념 |
 | 쩜오 순서 | half를 하나라도 쓰려면 그 직원의 풀타임 출근 횟수가 이미 `min(maxPerWeek, weekCap)`에 도달해 있어야 함 (하드) |
+| `overtimeDays` | 정규 상한(`min(maxPerWeek, weekCap)`)을 넘어 그 직원이 추가로 일할 수 있는 날 수 (0.5일 단위). 단위 상한은 `round(overtimeDays*2)`, 출근 횟수 상한은 `ceil(overtimeDays)`로 변환해 건다 (쩜오만으로 상한을 여러 번 피해가는 것 차단). 9.4 이전에는 모든 직원에게 똑같이 적용되는 전역 규칙(`rules.overtime`)이었으나 직원별 항목으로 대체됨 |
 | 마감-오픈-마감 | 캘린더 인접일이 아니라 그 직원이 실제로 근무한 바로 전/다음 날 기준으로 검사 (쉬는 날 스킵) |
 | 바 인원 최소 보장 | 금토일 12~17시 최소 3명, 11~21시 나머지 최소 2명 / 평일 12~21시 최소 2명. 소프트 floor(11~17, 요일 무관, 12절)보다 훨씬 무거운 페널티(`hardFloorShort`)로 별도로 건다 — 채울 수 있으면 사실상 하드, 인력이 정말 모자라면 그 시간대만 미달로 남기고 warnings에 남김 |
 | 필수 자리·바 인원 완화 | `requireFillShort`/`hardFloorShort`로 다른 모든 항을 압도하는 무거운 페널티를 줘서, 인력 부족으로 도저히 못 채우는 경우에도 INFEASIBLE 대신 최선의 부분 배정 + 어디가 비었는지 warnings로 반환 |
@@ -425,6 +426,21 @@ const breaksOf = (date) =>
 
 v1은 **주 단위 고정**을 권한다. 달 단위는 변수가 4배 이상 늘어 속도 미검증이고,
 현재 UI의 `runAuto`도 주 단위다. 달 단위가 필요하면 별도 검증 후 추가한다.
+
+### 9.4 초과근무 가능일수 — **직원별 항목(`overtimeDays`)으로 확정**
+
+기존에는 `rules.overtime.maxExtraShifts`/`maxExtraUnits`로, 모든 직원에게 똑같이
+"정규 상한 +1회/+2단위(=1일)"가 적용됐다(`runAuto`에 하드코딩). 인력이 빠듯한 주에
+특정 직원만 초과근무를 더 받을 수 있는데도 전역 값에 막혀 그 여력을 못 썼다.
+
+`Employee.overtimeDays`(0.5일 단위, 기본값 1)로 직원별로 건다. 단위 상한은
+`round(overtimeDays*2)`, 출근 횟수 상한은 `ceil(overtimeDays)`로 변환한다 —
+쩜오만 여러 번 넣어 상한을 우회하는 걸 막기 위해 둘을 따로 거는 기존 설계(HANDOFF.md
+4절 "초과 산정")를 그대로 유지한 것. `overtimeDays: 1`(기본값)이면 이전 전역 규칙과
+정확히 동일하게 동작해 기존 데이터의 배정 결과가 바뀌지 않는다.
+
+`rules.overtime` 필드와 `OvertimeRule`은 제거했다(완전 대체, 전역 값과 직원별 값을
+동시에 유지하지 않음).
 
 ---
 

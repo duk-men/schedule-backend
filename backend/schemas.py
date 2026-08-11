@@ -18,6 +18,10 @@ class Employee(BaseModel):
     minPerWeek: int = 0
     maxWeekday: Optional[int] = None  # 평일(비피크)만 따로 거는 상한. None이면 제한 없음
     maxHalf: int = 0
+    # 정규 상한(min(maxPerWeek, weekCap))을 넘어 추가로 일할 수 있는 날 수. 0.5일 단위
+    # (쩜오 하나 = 0.5, 풀타임 하루 = 1). 직원마다 다르게 걸 수 있다 — 이전에는 모든
+    # 직원에게 똑같이 적용되는 전역 규칙(Rules.overtime)이었으나 9.4에서 직원별로 전환.
+    overtimeDays: float = 1.0
     canEightStart: bool = False  # 8시 시작 자리(찐오/이른오전/오전쩜오) 전부에 대한 자격
     isRookie: bool = False  # 신입 여부. 신입 둘이 같은 날 오픈조(8시+9시)를 동반하면 안 됨
     until: Optional[str] = None
@@ -68,11 +72,6 @@ class BreadRule(BaseModel):
     len: int = 1
 
 
-class OvertimeRule(BaseModel):
-    maxExtraShifts: int = 0
-    maxExtraUnits: int = 0
-
-
 class Rules(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -81,7 +80,7 @@ class Rules(BaseModel):
     floor: FloorRule
     break_: BreakRule = Field(alias="break")
     bread: BreadRule
-    overtime: OvertimeRule = Field(default_factory=OvertimeRule)
+    # 초과근무 가능일수는 9.4에서 직원별 항목(Employee.overtimeDays)으로 옮겨감.
     shortage: Literal["leave", "half", "extra", "both"] = "both"
     # 9.1에서 true로 확정. 필드는 남겨 프론트가 실험할 수 있게 하되 기본값·항상 보내는 값은 true.
     requireSlotFill: bool = True

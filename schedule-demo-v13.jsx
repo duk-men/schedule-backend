@@ -423,7 +423,17 @@ function empFromDb(r) {
   };
 }
 // 배정표·설정 등 나머지 전체 상태는 app_state 테이블 한 행에 통째로 담는다
-function appStateToDb({ board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks }) {
+function appStateToDb({
+  board,
+  lockMap,
+  needs,
+  breadWeekday,
+  breadPeak,
+  shortage,
+  serverBreaks,
+  employeeOrder,
+  boardOrder,
+}) {
   return {
     id: APP_STATE_ID,
     board,
@@ -433,6 +443,8 @@ function appStateToDb({ board, lockMap, needs, breadWeekday, breadPeak, shortage
     bread_peak: breadPeak,
     shortage,
     server_breaks: serverBreaks,
+    employee_order: employeeOrder,
+    board_order: boardOrder,
   };
 }
 
@@ -988,6 +1000,23 @@ function SnapshotRules({ rules, needs }) {
 }
 
 /* ------------------------------------------------------------------
+   직원 순서. 직원 탭 순서와 근무표 탭 순서는 서로 다른 목록(employeeOrder/boardOrder)으로
+   완전히 분리 관리한다 — 근무표 탭에서 드래그해 바꾼 순서가 직원 탭 순서에 영향을 주면
+   안 되기 때문이다. order는 app_state에 저장된 employeeId 배열(매장별). 아직 순서에
+   없는 신규 직원은 기존 배열 순서 그대로 뒤에 붙는다 (Array.sort는 안정 정렬이라
+   동순위끼리 원래 순서가 유지된다).
+   ------------------------------------------------------------------ */
+function applyOrder(order, itemsInNaturalOrder, idOf) {
+  if (!order || order.length === 0) return itemsInNaturalOrder;
+  const pos = new Map(order.map((id, i) => [id, i]));
+  return [...itemsInNaturalOrder].sort((a, b) => {
+    const pa = pos.has(idOf(a)) ? pos.get(idOf(a)) : Infinity;
+    const pb = pos.has(idOf(b)) ? pos.get(idOf(b)) : Infinity;
+    return pa - pb;
+  });
+}
+
+/* ------------------------------------------------------------------
    화면
    ------------------------------------------------------------------ */
 export default function ScheduleDemo() {
@@ -1011,6 +1040,12 @@ export default function ScheduleDemo() {
   const [picker, setPicker] = useState(null);
   const [tab, setTab] = useState("board");
   const [vacFor, setVacFor] = useState(null);
+  // 직원 탭 순서·근무표 탭 순서. storeId -> [empId, ...]. app_state에 함께 저장돼
+  // 기기와 무관하게 공유된다. 서로 다른 필드(employee_order/board_order)로 완전히 분리 저장한다.
+  const [employeeOrder, setEmployeeOrder] = useState({});
+  const [boardOrder, setBoardOrder] = useState({});
+  const [boardDragId, setBoardDragId] = useState(null); // 근무표 탭에서 드래그 중인 직원 id
+  const boardDragRef = useRef({ rowEls: {}, id: null, clone: null, startY: 0, startTop: 0, order: null });
   const [shortage, setShortage] = useState("both");
   const [breadWeekday, setBreadWeekday] = useState(tb(16));
   const [breadPeak, setBreadPeak] = useState(tb(17, 30));
@@ -1075,10 +1110,22 @@ export default function ScheduleDemo() {
           if (stateRow.bread_peak != null) setBreadPeak(stateRow.bread_peak);
           if (stateRow.shortage) setShortage(stateRow.shortage);
           setServerBreaks(stateRow.server_breaks || {});
+          setEmployeeOrder(stateRow.employee_order || {});
+          setBoardOrder(stateRow.board_order || {});
         } else {
-          const { error } = await supabase
-            .from("app_state")
-            .upsert(appStateToDb({ board: {}, lockMap: {}, needs, breadWeekday, breadPeak, shortage, serverBreaks: {} }));
+          const { error } = await supabase.from("app_state").upsert(
+            appStateToDb({
+              board: {},
+              lockMap: {},
+              needs,
+              breadWeekday,
+              breadPeak,
+              shortage,
+              serverBreaks: {},
+              employeeOrder: {},
+              boardOrder: {},
+            })
+          );
           if (error) throw error;
         }
       } catch (err) {
@@ -1128,7 +1175,19 @@ export default function ScheduleDemo() {
       pendingStateSaveRef.current = null;
       supabase
         .from("app_state")
-        .upsert(appStateToDb({ board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks }))
+        .upsert(
+          appStateToDb({
+            board,
+            lockMap,
+            needs,
+            breadWeekday,
+            breadPeak,
+            shortage,
+            serverBreaks,
+            employeeOrder,
+            boardOrder,
+          })
+        )
         .then(({ error }) => {
           if (error) console.error("[supabase] 배정표 저장 실패", error);
         });
@@ -1137,7 +1196,18 @@ export default function ScheduleDemo() {
     clearTimeout(saveStateTimer.current);
     saveStateTimer.current = setTimeout(doSave, 400);
     return () => clearTimeout(saveStateTimer.current);
-  }, [board, lockMap, needs, breadWeekday, breadPeak, shortage, serverBreaks, dbLoaded]);
+  }, [
+    board,
+    lockMap,
+    needs,
+    breadWeekday,
+    breadPeak,
+    shortage,
+    serverBreaks,
+    employeeOrder,
+    boardOrder,
+    dbLoaded,
+  ]);
 
   // 탭을 벗어나거나(새로고침·닫기·다른 탭 전환 포함) 숨겨지는 순간, 디바운스를 기다리던
   // 저장이 있으면 즉시 실행한다. 이게 없으면 "방금 만든 결과를 보자마자 새로고침"할 때
@@ -1204,6 +1274,20 @@ export default function ScheduleDemo() {
   const locked = lockMap[storeId] || {};
   const autoDates = autoMap[storeId] || {};
   const staff = useMemo(() => employees.filter((e) => e.storeId === storeId), [employees, storeId]);
+  // 직원 탭 순서. 직접 순서를 정한 적이 없으면 기본(등록) 순서를 그대로 쓴다.
+  const orderedStaff = useMemo(
+    () => applyOrder(employeeOrder[storeId], staff, (e) => e.id),
+    [employeeOrder, storeId, staff]
+  );
+  // 근무표 탭 순서. 근무표에서 직접 순서를 바꾼 적이 없으면 "직원 탭 순서로 근무표
+  // 순서가 만들어진다"는 요구대로 직원 탭 순서를 그대로 물려받는다. 하지만 한 번이라도
+  // 근무표에서 순서를 바꿔 저장하면 그 뒤로는 완전히 독립된 순서로 동작하고, 직원 탭
+  // 순서를 나중에 바꿔도 근무표 순서는 영향받지 않는다.
+  const orderedStaffForBoard = useMemo(() => {
+    const custom = boardOrder[storeId];
+    if (custom && custom.length > 0) return applyOrder(custom, staff, (e) => e.id);
+    return orderedStaff;
+  }, [boardOrder, storeId, staff, orderedStaff]);
 
   const empById = useCallback((id) => employees.find((e) => e.id === id), [employees]);
   const dayOf = useCallback((date) => assign[date] || {}, [assign]);
@@ -1723,8 +1807,97 @@ export default function ScheduleDemo() {
         })
       )
     );
-    return [...staff, ...extra];
-  }, [weekDates, dayOf, empById, staff, storeId]);
+    return [...orderedStaffForBoard, ...extra];
+  }, [weekDates, dayOf, empById, orderedStaffForBoard, storeId]);
+
+  // 근무표 탭 드래그 순서 변경. drag_drop_demo.html과 같은 방식: 드래그 핸들을 잡으면
+  // 카드를 복제해 포인터를 따라다니게 하고(clone), 실제 행 순서는 React state로 즉시
+  // 옮겨 놓는다(next). 이 순서는 boardOrder에만 쓰여 employeeOrder(직원 탭)와는
+  // 완전히 분리된다. 커밋된 순서는 app_state 저장 이펙트(위쪽)가 알아서 서버에 반영한다.
+  function onBoardHandleDown(ev, empId) {
+    ev.preventDefault();
+    const rowEls = boardDragRef.current.rowEls;
+    const rowEl = rowEls[empId];
+    if (!rowEl) return;
+    const rect = rowEl.getBoundingClientRect();
+
+    const clone = rowEl.cloneNode(true);
+    clone.style.position = "fixed";
+    clone.style.zIndex = "9999";
+    clone.style.left = `${rect.left}px`;
+    clone.style.top = `${rect.top}px`;
+    clone.style.width = `${rect.width}px`;
+    clone.style.margin = "0";
+    clone.style.pointerEvents = "none";
+    clone.style.opacity = "0.92";
+    clone.style.boxShadow = "0 4px 12px rgba(0,0,0,0.18)";
+    clone.style.background = CARD;
+    clone.style.borderRadius = "4px";
+    document.body.appendChild(clone);
+
+    boardDragRef.current = {
+      rowEls,
+      id: empId,
+      clone,
+      startY: ev.clientY,
+      startTop: rect.top,
+      order: orderedStaffForBoard.map((s) => s.id),
+    };
+    setBoardDragId(empId);
+    try {
+      ev.target.setPointerCapture(ev.pointerId);
+    } catch {
+      // Safari 구버전 등 미지원 환경 — 무시하고 마우스 이벤트만으로 계속 진행
+    }
+
+    function onMove(mv) {
+      const st = boardDragRef.current;
+      if (!st.id) return;
+      const dy = mv.clientY - st.startY;
+      if (st.clone) st.clone.style.top = `${st.startTop + dy}px`;
+
+      let targetIdx = st.order.length - 1;
+      for (let i = 0; i < st.order.length; i++) {
+        const el = st.rowEls[st.order[i]];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (mv.clientY < r.top + r.height / 2) {
+          targetIdx = i;
+          break;
+        }
+      }
+      const curIdx = st.order.indexOf(st.id);
+      if (curIdx === -1 || targetIdx === curIdx) return;
+      const next = [...st.order];
+      next.splice(curIdx, 1);
+      next.splice(targetIdx, 0, st.id);
+      st.order = next;
+      setBoardOrder((prev) => ({ ...prev, [storeId]: next }));
+    }
+
+    function onUp() {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      const st = boardDragRef.current;
+      if (st.clone) st.clone.remove();
+      setBoardDragId(null);
+      boardDragRef.current = { rowEls: st.rowEls, id: null, clone: null, startY: 0, startTop: 0, order: null };
+    }
+
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  }
+
+  // 직원 탭: 한 칸 위/아래로 스왑한다.
+  function moveEmployee(empId, dir) {
+    const current = orderedStaff.map((e) => e.id);
+    const idx = current.indexOf(empId);
+    const swapIdx = idx + dir;
+    if (idx < 0 || swapIdx < 0 || swapIdx >= current.length) return;
+    const next = [...current];
+    [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+    setEmployeeOrder((prev) => ({ ...prev, [storeId]: next }));
+  }
 
   // 이번 주 근무일수. 전 매장을 합쳐야 지원 나간 날이 빠지지 않는다
   const weekDaysOf = useCallback(
@@ -2233,7 +2406,7 @@ export default function ScheduleDemo() {
                 <div style={{ minWidth: 340 }}>
                   <div
                     className="grid gap-[2px]"
-                    style={{ gridTemplateColumns: "40px repeat(7, minmax(0,1fr))" }}
+                    style={{ gridTemplateColumns: "58px repeat(7, minmax(0,1fr))" }}
                   >
                     <div />
                     {weekDates.map((d) => {
@@ -2271,13 +2444,35 @@ export default function ScheduleDemo() {
 
                   {weekRows.map((e) => {
                     const guest = e.storeId !== storeId;
+                    const dragging = boardDragId === e.id;
                     return (
                       <div
                         key={e.id}
+                        ref={(el) => {
+                          boardDragRef.current.rowEls[e.id] = el;
+                        }}
                         className="mt-[2px] grid gap-[2px]"
-                        style={{ gridTemplateColumns: "40px repeat(7, minmax(0,1fr))" }}
+                        style={{
+                          gridTemplateColumns: "58px repeat(7, minmax(0,1fr))",
+                          opacity: dragging ? 0.35 : 1,
+                        }}
                       >
-                        <div className="flex items-center">
+                        <div className="flex items-center gap-1">
+                          {!guest && (
+                            <span
+                              onPointerDown={(ev) => onBoardHandleDown(ev, e.id)}
+                              className="flex h-6 w-4 shrink-0 items-center justify-center"
+                              style={{ touchAction: "none", cursor: "grab", color: MUTED }}
+                              aria-label="순서 변경"
+                              title="드래그해서 순서 변경"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                                <line x1="4" y1="7" x2="20" y2="7" />
+                                <line x1="4" y1="12" x2="20" y2="12" />
+                                <line x1="4" y1="17" x2="20" y2="17" />
+                              </svg>
+                            </span>
+                          )}
                           <span
                             className="truncate text-[11px] font-medium"
                             style={{ color: guest ? GUEST : INK }}
@@ -2691,9 +2886,9 @@ export default function ScheduleDemo() {
                 이번 달 근무일수 (쩜오 0.5, 전 매장 합산)
               </div>
               <div className="mt-2 flex flex-col gap-2">
-                {staff.map((e) => {
+                {orderedStaffForBoard.map((e) => {
                   const st = stats[e.id] || { days: 0, half: 0, guest: 0 };
-                  const top = Math.max(1, ...staff.map((s) => stats[s.id]?.days || 0));
+                  const top = Math.max(1, ...orderedStaffForBoard.map((s) => stats[s.id]?.days || 0));
                   return (
                     <div key={e.id} className="flex items-center gap-2">
                       <span className="w-16 shrink-0 truncate text-xs">
@@ -2747,7 +2942,7 @@ export default function ScheduleDemo() {
           </button>
 
           <div className="mt-3 flex flex-col gap-2">
-            {staff.map((e) => {
+            {orderedStaff.map((e, idx) => {
               const st = stats[e.id] || { days: 0, half: 0, guest: 0 };
               return (
                 <div key={e.id} className="rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
@@ -2771,13 +2966,35 @@ export default function ScheduleDemo() {
                           .join(", ")}
                       </span>
                     )}
-                    <button
-                      onClick={() => removeEmployee(e.id)}
-                      className="ml-auto font-mono text-[11px] active:opacity-60"
-                      style={{ color: ALERT }}
-                    >
-                      삭제
-                    </button>
+                    <span className="ml-auto flex items-center gap-1">
+                      <button
+                        onClick={() => moveEmployee(e.id, -1)}
+                        disabled={idx === 0}
+                        className="flex h-6 w-6 items-center justify-center rounded font-mono text-[11px] active:opacity-60"
+                        style={{ border: `1px solid ${RULE}`, color: idx === 0 ? EMPTY : MUTED }}
+                        aria-label="위로 이동"
+                        title="위로 이동"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        onClick={() => moveEmployee(e.id, 1)}
+                        disabled={idx === orderedStaff.length - 1}
+                        className="flex h-6 w-6 items-center justify-center rounded font-mono text-[11px] active:opacity-60"
+                        style={{ border: `1px solid ${RULE}`, color: idx === orderedStaff.length - 1 ? EMPTY : MUTED }}
+                        aria-label="아래로 이동"
+                        title="아래로 이동"
+                      >
+                        ▼
+                      </button>
+                      <button
+                        onClick={() => removeEmployee(e.id)}
+                        className="font-mono text-[11px] active:opacity-60"
+                        style={{ color: ALERT }}
+                      >
+                        삭제
+                      </button>
+                    </span>
                   </div>
 
                   {e.kind === "day" && (

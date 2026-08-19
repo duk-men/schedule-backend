@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { health, solveWeek, SolveError } from "./src/api.js";
 import { supabase, APP_STATE_ID } from "./src/supabaseClient.js";
+import writeXlsxFile from "write-excel-file/browser";
 
 /* ------------------------------------------------------------------
    색상 토큰
@@ -55,6 +56,8 @@ const HALF = [
 const ALL_SLOTS = [...SHIFTS, ...HALF].map((s) => ({ ...s, short: rangeLabel(s) }));
 const slotInfo = (key) => ALL_SLOTS.find((s) => s.key === key);
 const timeText = (s) => `${bucketLabel(s.from)}–${bucketLabel(s.to)}`;
+// 엑셀 다운로드에서 자주 쓰는 세 자리만 한 글자로 줄인다. 나머지는 시간 범위 그대로 둔다
+const EXCEL_ABBR = { "8-18": "오", "12-22": "마", "22-8": "야" };
 
 // 마감만 여러 명이 같은 시각에 출근할 수 있다. 8시 출근(찐오/이른오전/오전쩜오)과
 // 9시 출근(짭오)은 그 시각에 오직 한 명만 — 슬롯 종류가 달라도 마찬가지다.
@@ -121,6 +124,10 @@ const rawNeed = (slot, peak) => {
   return peak && slot.peak != null ? slot.peak : slot.need;
 };
 const needOf = (slot, dateStr) => rawNeed(slot, isPeak(dateStr));
+// 필수인원 위로 추가 배정할 수 있는 여유분. 규칙 탭 "최대인원"에서 조절한다(요청:
+// 특정 날만 마감 등에 2명째를 넣고 싶은데, need를 올리면 매일이 하한이 되어버려서
+// 다른 날이 전부 "부족"으로 잘못 뜨는 문제가 있었음. need는 그대로 두고 이 값만 늘린다).
+const extraOf = (slot) => NEED_OVERRIDE[slot.key]?.extra ?? slot.extra ?? 0;
 
 function canWork(e, slot, dateStr) {
   const win = isPeak(dateStr) ? e.avail?.peak : e.avail?.weekday;
@@ -655,7 +662,7 @@ function autoAssignAll({
     if (wcOf(e.id, date) + 1 > Math.min(e.maxPerWeek, WEEK_CAP)) return false;
     for (const key of FILL_ORDER) {
       const slot = slotInfo(key);
-      if (needOf(slot, date) + slot.extra - (day[key] || []).length <= 0) continue;
+      if (needOf(slot, date) + extraOf(slot) - (day[key] || []).length <= 0) continue;
       if (startTaken(day, slot)) continue;
       if (slot.from === tb(8) && !slot.night && !e.canEightStart) continue;
       if (!canWork(e, slot, date)) continue;
@@ -760,7 +767,7 @@ function autoAssignAll({
       if ((weekSlack[`${store.id}|${weekKey(date)}`] || 0) > 0) {
         for (const key of FILL_ORDER) {
           const slot = slotInfo(key);
-          const room = needOf(slot, date) + slot.extra - (day[key] || []).length;
+          const room = needOf(slot, date) + extraOf(slot) - (day[key] || []).length;
           if (room <= 0) continue;
           if (gapCut(slot, combinedGap(day, prevDayObj, date)) < 1) continue;
           if (overCap(day, date, slot)) continue;
@@ -799,7 +806,7 @@ function autoAssignAll({
       if (useExtra) {
         for (const key of FILL_ORDER) {
           const slot = slotInfo(key);
-          const room = needOf(slot, date) + slot.extra - (day[key] || []).length;
+          const room = needOf(slot, date) + extraOf(slot) - (day[key] || []).length;
           if (room <= 0) continue;
           // 30분짜리 구멍 하나 때문에 사람을 통째로 넣지는 않는다
           if (gapCut(slot, combinedGap(day, prevDayObj, date)) < 2) continue;
@@ -1037,6 +1044,7 @@ export default function ScheduleDemo() {
   const [solveError, setSolveError] = useState(null);
   const [serverOk, setServerOk] = useState(null); // null=확인중 | true | false
   const [copyStatus, setCopyStatus] = useState("idle"); // idle | copied | error
+  const [excelStatus, setExcelStatus] = useState("idle"); // idle | done | error
   const [selected, setSelected] = useState(null);
   const [picker, setPicker] = useState(null);
   const [tab, setTab] = useState("board");
@@ -1074,7 +1082,7 @@ export default function ScheduleDemo() {
     const o = {};
     ALL_SLOTS.forEach((sl) => {
       if (sl.half) return;
-      o[sl.key] = { weekday: sl.need, peak: sl.peak != null ? sl.peak : sl.need };
+      o[sl.key] = { weekday: sl.need, peak: sl.peak != null ? sl.peak : sl.need, extra: sl.extra ?? 0 };
     });
     applyNeeds(o);
     return o;
@@ -1278,8 +1286,18 @@ export default function ScheduleDemo() {
   }, [tab, storeId, weekStart]);
 
   // 필요 인원을 바꾸면 곡선 캐시를 비우고 다시 계산하게 한다
-  function patchNeed(key, kind, value) {
-    const next = { ...needs, [key]: { ...needs[key], [kind]: value } };
+  // 필수인원(하한, 평일·금토일 공통)과 최대인원(필수인원 위로 더 넣을 수 있는 한도)을
+  // 조절한다. weekday/peak를 따로 두던 예전 UI는 실제로 늘 같은 값으로 쓰이고 있어서
+  // (평일=금토일), 그 자리를 "최대인원"으로 바꿨다 — need를 올려 특정 날만 인원을
+  // 늘리려다 그 요일 타입 전체의 하한이 올라가버리는 문제를 없애기 위함.
+  function patchRequired(key, value) {
+    const next = { ...needs, [key]: { ...needs[key], weekday: value, peak: value } };
+    applyNeeds(next);
+    setNeeds(next);
+  }
+  function patchMax(key, value) {
+    const required = needs[key]?.weekday ?? 0;
+    const next = { ...needs, [key]: { ...needs[key], extra: Math.max(0, value - required) } };
     applyNeeds(next);
     setNeeds(next);
   }
@@ -1401,7 +1419,7 @@ export default function ScheduleDemo() {
       to: s.to,
       need: s.half ? 0 : needs[s.key]?.weekday ?? s.need ?? 0,
       peak: s.half ? 0 : needs[s.key]?.peak ?? (s.peak != null ? s.peak : s.need) ?? 0,
-      extra: s.extra ?? 0,
+      extra: s.half ? 0 : extraOf(s),
       open: !!s.open,
       late: !!s.late,
       night: !!s.night,
@@ -1784,6 +1802,45 @@ export default function ScheduleDemo() {
       setCopyStatus("error");
     }
     setTimeout(() => setCopyStatus("idle"), 2000);
+  }
+
+  // 이번 주 근무표를 엑셀로 내려받는다. 자리가 없는 날은 이유(휴가·종료일·미배정)와
+  // 무관하게 전부 "휴"로 적고 빨간 글씨, 배정된 날은 검은 글씨로 적는다. 단 지원(타
+  // 매장 직원)은 이름 대신 "지원"만 적고, 이 매장 기준으로는 휴가 개념이 없으니
+  // 미배정 칸은 "휴" 없이 빈칸으로 둔다. 8-18/12-22/22-8은 한 글자로 줄이고 나머지
+  // 자리는 시간 범위 그대로 쓴다. 표 자체는 A열/1행을 비우고 B열/2행부터 시작한다.
+  async function exportExcel() {
+    const header = ["", ...weekDates.map((d) => `${WD[wdIndex(parse(d))]}(${Number(d.slice(8))})`)];
+    const border = { borderColor: "#000000", borderStyle: "thin" };
+
+    const headerRow = [{ value: "" }, ...header.map((h) => ({ value: h, fontWeight: "bold", ...border }))];
+
+    const rows = weekRows.map((e) => {
+      const guest = e.storeId !== storeId;
+      const nameCell = { value: guest ? "지원" : e.name, fontWeight: "bold", textColor: "#000000", ...border };
+      const cells = weekDates.map((d) => {
+        const key = slotOfEmp(e.id, d);
+        if (key) {
+          const short = slotInfo(key).short;
+          return { value: EXCEL_ABBR[short] || short, textColor: "#000000", ...border };
+        }
+        if (guest) return { value: "", ...border };
+        return { value: "휴", textColor: "#FF0000", ...border };
+      });
+      return [{ value: "" }, nameCell, ...cells];
+    });
+
+    const blankRow = [{ value: "" }, ...header.map(() => ({ value: "" }))];
+
+    try {
+      await writeXlsxFile([blankRow, headerRow, ...rows], {
+        columns: [{ width: 3 }, { width: 10 }, ...weekDates.map(() => ({ width: 8 }))],
+      }).toFile(`${storeName(storeId)}_${weekStart}_근무표.xlsx`);
+      setExcelStatus("done");
+    } catch {
+      setExcelStatus("error");
+    }
+    setTimeout(() => setExcelStatus("idle"), 2000);
   }
 
   const stats = useMemo(() => {
@@ -2379,6 +2436,20 @@ export default function ScheduleDemo() {
         </button>
       )}
 
+      {view === "week" && hasSchedule && (
+        <button
+          onClick={exportExcel}
+          className="mt-2 w-full rounded-md py-2 text-xs font-medium active:opacity-70"
+          style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
+        >
+          {excelStatus === "done"
+            ? "다운로드됨 ✓"
+            : excelStatus === "error"
+            ? "다운로드 실패 — 다시 시도해 주세요"
+            : "📥 이번 주 근무표 엑셀로 다운로드"}
+        </button>
+      )}
+
       {peakShortDays.length > 0 && (
         <div
           className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
@@ -2570,7 +2641,7 @@ export default function ScheduleDemo() {
         const ids = dayOf(selected)[slot.key] || [];
         const req = slot.half ? 0 : needOf(slot, selected);
         const lack = !slot.half && ids.length < req;
-        const cap = slot.half ? 99 : req + slot.extra;
+        const cap = slot.half ? 99 : req + extraOf(slot);
         const blocked = startTaken(dayOf(selected), slot);
 
         return (
@@ -3397,36 +3468,36 @@ export default function ScheduleDemo() {
           <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
             <div className="text-sm font-semibold">자리별 필수 인원</div>
             <div className="mt-1 text-[11px]" style={{ color: MUTED }}>
-              0으로 두면 인원이 남을 때만 채우는 여유 자리가 됩니다. 동시에 몇 명이 서 있게 될지가
-              여기서 정해집니다.
+              필수인원은 매일(평일·금토일 공통) 반드시 채워야 하는 최소 인원, 최대인원은
+              필요한 날에만 그 이상 자유롭게 추가로 넣을 수 있는 한도입니다. 필수인원을
+              0으로 두면 인원이 남을 때만 채우는 여유 자리가 됩니다.
             </div>
-            {ALL_SLOTS.filter((sl) => !sl.half).map((sl) => (
-              <div key={sl.key} className="mt-3">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="w-9 rounded text-center font-mono text-[9px] font-semibold"
-                    style={{ background: sl.color, color: PAPER }}
-                  >
-                    {sl.short}
-                  </span>
-                  <span className="text-xs font-medium">{sl.label}</span>
-                </div>
-                {[
-                  ["weekday", "평일"],
-                  ["peak", "금토일"],
-                ].map(([kind, label]) => (
-                  <div key={kind} className="mt-1 flex items-center gap-2">
-                    <span className="w-12 shrink-0 text-[11px]" style={{ color: MUTED }}>
-                      {label}
+            {ALL_SLOTS.filter((sl) => !sl.half).map((sl) => {
+              const required = needs[sl.key]?.weekday ?? 0;
+              const maxCap = required + (needs[sl.key]?.extra ?? 0);
+              return (
+                <div key={sl.key} className="mt-3">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="w-9 rounded text-center font-mono text-[9px] font-semibold"
+                      style={{ background: sl.color, color: PAPER }}
+                    >
+                      {sl.short}
+                    </span>
+                    <span className="text-xs font-medium">{sl.label}</span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="w-14 shrink-0 text-[11px]" style={{ color: MUTED }}>
+                      필수인원
                     </span>
                     <div className="flex flex-1 gap-1">
                       {[0, 1, 2, 3].map((v) => (
                         <button
                           key={v}
-                          onClick={() => patchNeed(sl.key, kind, v)}
+                          onClick={() => patchRequired(sl.key, v)}
                           className="h-7 flex-1 rounded font-mono text-[11px] active:opacity-60"
                           style={
-                            (needs[sl.key]?.[kind] ?? 0) === v
+                            required === v
                               ? { background: INK, color: PAPER }
                               : { border: `1px solid ${RULE}`, color: MUTED }
                           }
@@ -3436,9 +3507,33 @@ export default function ScheduleDemo() {
                       ))}
                     </div>
                   </div>
-                ))}
-              </div>
-            ))}
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="w-14 shrink-0 text-[11px]" style={{ color: MUTED }}>
+                      최대인원
+                    </span>
+                    <div className="flex flex-1 gap-1">
+                      {[0, 1, 2, 3].map((v) => (
+                        <button
+                          key={v}
+                          onClick={() => patchMax(sl.key, v)}
+                          disabled={v < required}
+                          className="h-7 flex-1 rounded font-mono text-[11px] active:opacity-60"
+                          style={
+                            maxCap === v
+                              ? { background: INK, color: PAPER }
+                              : v < required
+                              ? { border: `1px solid ${RULE}`, color: EMPTY }
+                              : { border: `1px solid ${RULE}`, color: MUTED }
+                          }
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="mt-3 rounded-lg p-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>

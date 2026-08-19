@@ -1634,6 +1634,13 @@ export default function ScheduleDemo() {
     });
   }
 
+  // 손으로 수정하지 않아도 미리 잠가둘 수 있게 하는 수동 잠금. markEdited와 달리
+  // autoMap은 건드리지 않는다 — 내용은 그대로고 "자동배정이 다시 안 건드리게"만
+  // 표시하는 거라 자동배정으로 채워졌다는 노란 표시를 지울 이유가 없다.
+  function lockDate(date) {
+    setLockMap((p) => ({ ...p, [storeId]: { ...(p[storeId] || {}), [date]: true } }));
+  }
+
   function toggleVacation(empId, date) {
     setEmployees((prev) =>
       prev.map((e) =>
@@ -2521,13 +2528,21 @@ export default function ScheduleDemo() {
           </span>
         )}
       </div>
-      {locked[selected] && (
+      {locked[selected] ? (
         <button
           onClick={() => unlock(selected)}
           className="rounded px-2 py-1 font-mono text-[11px] active:opacity-60"
           style={{ border: `1px solid ${RULE}`, color: MUTED }}
         >
-          잠금 풀기
+          🔒 잠금 풀기
+        </button>
+      ) : (
+        <button
+          onClick={() => lockDate(selected)}
+          className="rounded px-2 py-1 font-mono text-[11px] active:opacity-60"
+          style={{ border: `1px solid ${RULE}`, color: MUTED }}
+        >
+          잠그기
         </button>
       )}
     </div>

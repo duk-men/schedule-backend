@@ -1000,11 +1000,12 @@ function SnapshotRules({ rules, needs }) {
 }
 
 /* ------------------------------------------------------------------
-   직원 순서. 직원 탭 순서와 근무표 탭 순서는 서로 다른 목록(employeeOrder/boardOrder)으로
-   완전히 분리 관리한다 — 근무표 탭에서 드래그해 바꾼 순서가 직원 탭 순서에 영향을 주면
-   안 되기 때문이다. order는 app_state에 저장된 employeeId 배열(매장별). 아직 순서에
-   없는 신규 직원은 기존 배열 순서 그대로 뒤에 붙는다 (Array.sort는 안정 정렬이라
-   동순위끼리 원래 순서가 유지된다).
+   직원 순서. 직원 탭 순서(employeeOrder: {storeId: [empId,...]})와 근무표 탭 순서
+   (boardOrder: {storeId: {weekStart: [empId,...]}})는 서로 다른 목록으로 완전히
+   분리 관리한다 — 근무표 탭에서 드래그해 바꾼 순서가 직원 탭 순서에 영향을 주면 안
+   되기 때문이다. 근무표 탭 순서는 주(weekStart)마다 독립된 스냅샷이라 한 주에서
+   바꿔도 다른 주에는 영향이 없다. order 배열에 없는 신규 직원은 기존 배열 순서
+   그대로 뒤에 붙는다 (Array.sort는 안정 정렬이라 동순위끼리 원래 순서가 유지된다).
    ------------------------------------------------------------------ */
 function applyOrder(order, itemsInNaturalOrder, idOf) {
   if (!order || order.length === 0) return itemsInNaturalOrder;
@@ -1045,7 +1046,15 @@ export default function ScheduleDemo() {
   const [employeeOrder, setEmployeeOrder] = useState({});
   const [boardOrder, setBoardOrder] = useState({});
   const [boardDragId, setBoardDragId] = useState(null); // 근무표 탭에서 드래그 중인 직원 id
-  const boardDragRef = useRef({ rowEls: {}, id: null, clone: null, startY: 0, startTop: 0, order: null });
+  const boardDragRef = useRef({
+    rowEls: {},
+    id: null,
+    clone: null,
+    startY: 0,
+    startTop: 0,
+    order: null,
+    weekStart: null,
+  });
   const [shortage, setShortage] = useState("both");
   const [breadWeekday, setBreadWeekday] = useState(tb(16));
   const [breadPeak, setBreadPeak] = useState(tb(17, 30));
@@ -1279,15 +1288,15 @@ export default function ScheduleDemo() {
     () => applyOrder(employeeOrder[storeId], staff, (e) => e.id),
     [employeeOrder, storeId, staff]
   );
-  // 근무표 탭 순서. 근무표에서 직접 순서를 바꾼 적이 없으면 "직원 탭 순서로 근무표
-  // 순서가 만들어진다"는 요구대로 직원 탭 순서를 그대로 물려받는다. 하지만 한 번이라도
-  // 근무표에서 순서를 바꿔 저장하면 그 뒤로는 완전히 독립된 순서로 동작하고, 직원 탭
-  // 순서를 나중에 바꿔도 근무표 순서는 영향받지 않는다.
+  // 근무표 탭 순서. 주(weekStart)마다 완전히 독립된 스냅샷이다 — 이번 주에서 순서를
+  // 바꿔도 다른 주에는 영향이 없다. 아직 그 주에서 순서를 바꾼 적이 없으면 "직원 탭
+  // 순서로 근무표 순서가 만들어진다"는 요구대로 항상 직원 탭 순서를 그대로 물려받는다
+  // (다른 주에서 바꾼 값을 이어받지 않는다).
   const orderedStaffForBoard = useMemo(() => {
-    const custom = boardOrder[storeId];
+    const custom = boardOrder[storeId]?.[weekStart];
     if (custom && custom.length > 0) return applyOrder(custom, staff, (e) => e.id);
     return orderedStaff;
-  }, [boardOrder, storeId, staff, orderedStaff]);
+  }, [boardOrder, storeId, weekStart, staff, orderedStaff]);
 
   const empById = useCallback((id) => employees.find((e) => e.id === id), [employees]);
   const dayOf = useCallback((date) => assign[date] || {}, [assign]);
@@ -1842,6 +1851,7 @@ export default function ScheduleDemo() {
       startY: ev.clientY,
       startTop: rect.top,
       order: orderedStaffForBoard.map((s) => s.id),
+      weekStart,
     };
     setBoardDragId(empId);
     try {
@@ -1872,7 +1882,10 @@ export default function ScheduleDemo() {
       next.splice(curIdx, 1);
       next.splice(targetIdx, 0, st.id);
       st.order = next;
-      setBoardOrder((prev) => ({ ...prev, [storeId]: next }));
+      setBoardOrder((prev) => ({
+        ...prev,
+        [storeId]: { ...(prev[storeId] || {}), [st.weekStart]: next },
+      }));
     }
 
     function onUp() {
@@ -1881,7 +1894,15 @@ export default function ScheduleDemo() {
       const st = boardDragRef.current;
       if (st.clone) st.clone.remove();
       setBoardDragId(null);
-      boardDragRef.current = { rowEls: st.rowEls, id: null, clone: null, startY: 0, startTop: 0, order: null };
+      boardDragRef.current = {
+        rowEls: st.rowEls,
+        id: null,
+        clone: null,
+        startY: 0,
+        startTop: 0,
+        order: null,
+        weekStart: null,
+      };
     }
 
     document.addEventListener("pointermove", onMove);

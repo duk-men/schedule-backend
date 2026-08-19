@@ -1041,6 +1041,18 @@ export default function ScheduleDemo() {
   const [picker, setPicker] = useState(null);
   const [tab, setTab] = useState("board");
   const [vacFor, setVacFor] = useState(null);
+  // PC 화면(너비 1024px 이상)에서는 근무표+직원+통계를 한 화면에 4분할로 보여준다.
+  // 화면 크기로만 자동 전환되고 별도 토글 버튼은 없다.
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => setIsDesktop(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   // 직원 탭 순서·근무표 탭 순서. storeId -> [empId, ...]. app_state에 함께 저장돼
   // 기기와 무관하게 공유된다. 서로 다른 필드(employee_order/board_order)로 완전히 분리 저장한다.
   const [employeeOrder, setEmployeeOrder] = useState({});
@@ -2168,6 +2180,468 @@ export default function ScheduleDemo() {
       ? `${weekStart.slice(5).replace("-", "/")} – ${shiftDate(weekStart, 6).slice(5).replace("-", "/")}`
       : pad(month);
 
+  // PC 4분할 레이아웃 여부. 근무표/직원 탭을 볼 때만 해당하고(규칙·이력은 그대로 단일 화면),
+  // 화면이 좁으면 항상 false라 모바일 동작은 지금과 완전히 같다.
+  const showDesktopBoard = isDesktop && tab === "board";
+
+  // "이번 주 요약"·"월 근무 요약" 막대그래프. 모바일에서는 원래 위치(근무표 탭 안)에
+  // 그대로 보이고, PC 4분할에서는 오른쪽 칸으로 옮겨간다 — 내용은 하나뿐이고 보여줄
+  // 위치만 showDesktopBoard로 갈린다.
+  const weekStatsBlock = (
+    <div
+      className="mt-4 rounded-lg p-3"
+      style={{ background: CARD, border: `1px solid ${RULE}` }}
+    >
+      <div className="font-mono text-[11px]" style={{ color: MUTED }}>
+        이번 주 근무일수 (쩜오 0.5)
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+        {weekRows.map((e) => {
+          const n = weekDaysOf(e.id);
+          const local = storeDaysOf(e.id);
+          const guest = e.storeId !== storeId;
+          const cap = Math.min(e.maxPerWeek, WEEK_CAP);
+          const over = n > WEEK_CAP; // 주 6일을 넘긴 경우
+          const plus = !over && n > cap; // 본인 상한만 넘긴 경우
+          const under = !guest && e.minPerWeek > 0 && n < e.minPerWeek;
+          return (
+            <span key={e.id} className="flex items-center gap-1">
+              <span className="text-xs" style={{ color: guest ? GUEST : INK }}>
+                {guest ? "지원" : e.name}
+              </span>
+              <span
+                className="font-mono text-xs font-semibold"
+                style={{ color: guest ? GUEST : over ? ALERT : plus || under ? TIGHT : INK }}
+              >
+                {guest ? `${local}일` : `${n}/${cap}`}
+              </span>
+              {over && (
+                <span className="font-mono text-[9px]" style={{ color: ALERT }}>
+                  6일초과
+                </span>
+              )}
+              {plus && (
+                <span className="font-mono text-[9px]" style={{ color: TIGHT }}>
+                  추가
+                </span>
+              )}
+              {under && (
+                <span className="font-mono text-[9px]" style={{ color: TIGHT }}>
+                  미달
+                </span>
+              )}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const monthStatsBlock = view === "month" && hasSchedule && (
+    <div className="mt-4 rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+      <div className="font-mono text-[11px]" style={{ color: MUTED }}>
+        이번 달 근무일수 (쩜오 0.5, 전 매장 합산)
+      </div>
+      <div className="mt-2 flex flex-col gap-2">
+        {orderedStaffForBoard.map((e) => {
+          const st = stats[e.id] || { days: 0, half: 0, guest: 0 };
+          const top = Math.max(1, ...orderedStaffForBoard.map((s) => stats[s.id]?.days || 0));
+          return (
+            <div key={e.id} className="flex items-center gap-2">
+              <span className="w-16 shrink-0 truncate text-xs">
+                {e.name}
+                {e.kind === "night" && (
+                  <span className="ml-1 font-mono text-[9px]" style={{ color: MUTED }}>
+                    야
+                  </span>
+                )}
+              </span>
+              <span className="h-2 flex-1 rounded-full" style={{ background: PAPER }}>
+                <span
+                  className="block h-2 rounded-full"
+                  style={{
+                    width: `${(st.days / top) * 100}%`,
+                    background: e.kind === "night" ? INK : FILLED,
+                  }}
+                />
+              </span>
+              <span className="w-8 text-right font-mono text-xs">{st.days}</span>
+              {st.guest > 0 ? (
+                <span className="w-12 text-right font-mono text-[10px]" style={{ color: GUEST }}>
+                  지원{st.guest}
+                </span>
+              ) : (
+                <span
+                  className="w-12 text-right font-mono text-[10px]"
+                  style={{ color: st.half > e.maxHalf ? ALERT : MUTED }}
+                >
+                  쩜{st.half}/{e.maxHalf}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  // 자동 배정 버튼·경고 문구. 모바일에서는 그대로 보이고, PC 4분할에서는 details로
+  // 접어둔다(요청: 상단 탭과 캘린더 사이 문구가 화면을 많이 차지하니 가려달라).
+  const boardBanners = (
+    <>
+      {serverOk === false && (
+        <div
+          className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
+          style={{ background: ALERT, color: PAPER }}
+        >
+          계산 서버가 꺼져 있습니다. backend 폴더에서 uvicorn을 실행해 주세요.
+        </div>
+      )}
+
+      <div className="mt-3 flex gap-2">
+        <button
+          onClick={runAuto}
+          disabled={autoBusy}
+          className="flex-1 rounded-md py-3 text-sm font-semibold active:opacity-70"
+          style={{
+            background: INK,
+            color: PAPER,
+            opacity: autoBusy ? 0.7 : 1,
+            cursor: autoBusy ? "default" : "pointer",
+          }}
+        >
+          {autoBusy ? (
+            <span className="flex items-center justify-center gap-2">
+              <span
+                className="h-3 w-3 animate-spin rounded-full"
+                style={{ border: `2px solid ${PAPER}`, borderTopColor: "transparent" }}
+              />
+              계산 중…
+            </span>
+          ) : (
+            `이번 주 자동으로 짜기 (${storeName(storeId)})`
+          )}
+        </button>
+        {hasSchedule && (
+          <button
+            onClick={clearAll}
+            disabled={autoBusy}
+            className="rounded-md px-4 text-sm active:opacity-70"
+            style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
+          >
+            비우기
+          </button>
+        )}
+      </div>
+
+      {solveError && (
+        <div
+          className="mt-2 whitespace-pre-line rounded-md px-3 py-2 text-xs leading-relaxed"
+          style={{ background: "#F5EAD6", color: "#7A5A18" }}
+        >
+          {solveError}
+        </div>
+      )}
+
+      {diagnostics && solveMeta && (
+        <details className="mt-2 rounded-md px-3 py-2 text-xs" style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}>
+          <summary className="cursor-pointer font-medium" style={{ color: INK }}>
+            {solveMeta.status === "OPTIMAL" ? "최적해" : solveMeta.status === "TIMEOUT" ? "근사해" : solveMeta.status}
+            {" "}({Math.round(solveMeta.objective ?? 0)}점) · {solveMeta.wallTimeSec.toFixed(1)}초
+          </summary>
+          <div className="mt-1 leading-relaxed">
+            형평 {Math.round(diagnostics.penalties.fairness)} · 부족 {Math.round(diagnostics.penalties.gap)} ·
+            {" "}부족일수 {Math.round(diagnostics.penalties.gapDays)} · 바인원 {Math.round(diagnostics.penalties.floor)} ·
+            {" "}과잉 {Math.round(diagnostics.penalties.over)} · 최소근무 {Math.round(diagnostics.penalties.minWeek)} ·
+            {" "}초과근무 {Math.round(diagnostics.penalties.overtime)}
+          </div>
+          {solveMeta.warnings.length > 0 && (
+            <div className="mt-1 leading-relaxed" style={{ color: "#7A5A18" }}>
+              {solveMeta.warnings.map((w, i) => (
+                <div key={i}>· {w}</div>
+              ))}
+            </div>
+          )}
+        </details>
+      )}
+
+      {view === "week" && hasSchedule && (
+        <button
+          onClick={copyResultMarkdown}
+          className="mt-2 w-full rounded-md py-2 text-xs font-medium active:opacity-70"
+          style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
+        >
+          {copyStatus === "copied"
+            ? "복사됨 ✓ — 붙여넣기 해서 공유하세요"
+            : copyStatus === "error"
+            ? "복사 실패 — 브라우저 권한을 확인해 주세요"
+            : "📋 이번 주 결과 마크다운으로 복사"}
+        </button>
+      )}
+
+      {peakShortDays.length > 0 && (
+        <div
+          className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
+          style={{ background: ALERT, color: PAPER }}
+        >
+          금토일 {peakShortDays.length}일이 비었습니다. 이 날은 채워야 하니 직접 조정하세요.
+        </div>
+      )}
+
+      {floorRiskDays.length > 0 && (
+        <div
+          className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+          style={{ background: "#F5EAD6", color: "#7A5A18" }}
+        >
+          {floorRiskDays.length}일은 휴게와 빵 받는 시간이 겹쳐 바에 {FLOOR_MIN}명이 안 남습니다.
+        </div>
+      )}
+
+      {shortDays.length > 0 && (
+        <div
+          className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+          style={{ background: "#F7E6E1", color: ALERT }}
+        >
+          {view === "week" ? "이번 주" : "이번 달"} {shortDays.length}일에 빈 자리가 있고, 합쳐서{" "}
+          {totalShortHours}시간 부족합니다.
+        </div>
+      )}
+
+      {view === "week" && weekLockedDays.length > 0 && (
+        <div
+          className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+          style={{ background: "#EAE8E1", color: MUTED }}
+        >
+          🔒 {weekLockedDays.map((d) => Number(d.slice(8))).join(", ")}일은 잠겨 있어 "이번 주
+          자동으로 짜기"를 눌러도 그대로 유지됩니다. 빈 자리가 안 없어진다면 이 날짜를 먼저
+          풀어보세요.
+        </div>
+      )}
+
+      {firstDayBoundaryGap && (
+        <div
+          className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
+          style={{ background: "#EAE8E1", color: MUTED }}
+        >
+          {Number(scopeDates[0].slice(8))}일 새벽(00~08시) 부족은 그 전날 밤 근무자가 아직
+          배정 안 되어서 생기는 것으로 보입니다. 이 범위만 다시 돌려서는 안 없어지고, 그 전날(전주)을
+          먼저 배정해야 사라집니다.
+        </div>
+      )}
+    </>
+  );
+
+  // 선택한 날짜 상세를 네 조각으로 나눈다. 모바일에서는 원래 순서(헤더 → 차트 →
+  // 휴게순번 → 자리별 배정)대로 한 카드에 이어붙이고, PC 4분할에서는 차트·휴게순번만
+  // 오른쪽 통계 칸으로 옮긴다(요청: 막대그래프·휴게순번은 오른쪽, 자리별 직원
+  // 넣고빼기는 캘린더 아래).
+  const selectedHeader = selected && (
+    <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-sm font-semibold">
+          {selected.slice(5).replace("-", "/")} ({WD[wdIndex(parse(selected))]})
+        </span>
+        {isPeak(selected) && (
+          <span
+            className="rounded px-1 py-[1px] font-mono text-[10px]"
+            style={{ background: INK, color: PAPER }}
+          >
+            금토일
+          </span>
+        )}
+      </div>
+      {locked[selected] && (
+        <button
+          onClick={() => unlock(selected)}
+          className="rounded px-2 py-1 font-mono text-[11px] active:opacity-60"
+          style={{ border: `1px solid ${RULE}`, color: MUTED }}
+        >
+          잠금 풀기
+        </button>
+      )}
+    </div>
+  );
+
+  const selectedCharts = selected && (
+    <div className="rounded-md p-2" style={{ background: PAPER }}>
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+          배정 인원
+        </span>
+        <span
+          className="font-mono text-[10px]"
+          style={{ color: gapMinOf(selected) > 0 ? ALERT : MUTED }}
+        >
+          {gapMinOf(selected) > 0 ? `${gapMinOf(selected)}분 부족` : "빈 자리 없음"}
+        </span>
+      </div>
+      <div className="mt-2">
+        <AxisChart
+          values={covOf(selected)}
+          top={Math.max(3, ...covOf(selected), ...demandFor(selected))}
+          colorAt={(n, i) =>
+            gapOf(covOf(selected), selected)[i] > 0 ? ALERT : FILLED
+          }
+        />
+      </div>
+
+      <div className="mt-3 flex items-center justify-between">
+        <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+          바 인원 (휴게·빵 제외)
+        </span>
+        <span
+          className="font-mono text-[10px]"
+          style={{
+            color:
+              floorMinOf(selected) < FLOOR_MIN
+                ? ALERT
+                : floorMinOf(selected) < FLOOR_OK
+                ? TIGHT
+                : MUTED,
+          }}
+        >
+          17시 전 최소 {floorMinOf(selected)}명
+        </span>
+      </div>
+      <div className="mt-2">
+        <AxisChart
+          values={floorOf(selected)}
+          top={Math.max(4, ...floorOf(selected))}
+          guide={FLOOR_MIN}
+          colorAt={(n, i) =>
+            i < FLOOR_FROM || i >= FLOOR_UNTIL
+              ? EMPTY
+              : n < FLOOR_MIN
+              ? ALERT
+              : FILLED
+          }
+        />
+      </div>
+
+      <div className="mt-3 font-mono text-[10px]" style={{ color: MUTED }}>
+        휴게인원 (휴게+빵으로 자리 비운 인원)
+      </div>
+      <div className="mt-2">
+        <AxisChart
+          values={restOf(selected)}
+          top={Math.max(2, ...restOf(selected))}
+          colorAt={() => GUEST}
+        />
+      </div>
+
+      <div className="mt-3 font-mono" style={{ fontSize: 10, color: MUTED }}>
+        휴게와 빵
+      </div>
+      <div className="mt-1">
+        <BreakTimeline date={selected} />
+        <Ticks />
+      </div>
+    </div>
+  );
+
+  const selectedBreakOrder = selected && breaksOf(selected).length > 0 && (
+    <div className="rounded-md p-2" style={{ background: PAPER }}>
+      <div className="font-mono text-[10px]" style={{ color: MUTED }}>
+        휴게 순번
+      </div>
+      <div className="mt-2 flex flex-col gap-1">
+        {breaksOf(selected).map((b, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <span
+              className="h-2 w-2 rounded-full"
+              style={{ background: slotInfo(b.slotKey).color }}
+            />
+            <span className="text-xs">{empById(b.empId)?.name}</span>
+            <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+              {slotInfo(b.slotKey).label}
+            </span>
+            <span className="ml-auto font-mono text-[11px]">
+              {bucketLabel(b.from)}~{bucketLabel(b.to)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const selectedSlots = selected && (
+    <div className={showDesktopBoard ? "grid grid-cols-2 gap-2" : "flex flex-col gap-2"}>
+      {ALL_SLOTS.map((slot) => {
+        const ids = dayOf(selected)[slot.key] || [];
+        const req = slot.half ? 0 : needOf(slot, selected);
+        const lack = !slot.half && ids.length < req;
+        const cap = slot.half ? 99 : req + slot.extra;
+        const blocked = startTaken(dayOf(selected), slot);
+
+        return (
+          <div
+            key={slot.key}
+            className="rounded-md p-2"
+            style={{
+              border: lack && !blocked ? `1px dashed ${ALERT}` : `1px solid ${RULE}`,
+              background: PAPER,
+              opacity: blocked && ids.length === 0 ? 0.45 : 1,
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className="rounded px-1 font-mono text-[9px] font-semibold"
+                style={{ background: slot.color, color: PAPER }}
+              >
+                {slot.short}
+              </span>
+              {/* PC 4분할에서는 칸이 좁아 이름+시간 텍스트가 줄바꿈되며 세로로 길어지므로
+                  뱃지만 남기고 뺀다 (요청). 모바일은 폭이 넉넉해 그대로 둔다 */}
+              {!showDesktopBoard && (
+                <>
+                  <span className="text-xs font-semibold">{slot.label}</span>
+                  <span className="font-mono text-[10px]" style={{ color: MUTED }}>
+                    {timeText(slot)}
+                  </span>
+                </>
+              )}
+              <span
+                className="ml-auto font-mono text-[10px]"
+                style={{ color: lack && !blocked ? ALERT : MUTED }}
+              >
+                {blocked && ids.length === 0
+                  ? "같은 시각 사용중"
+                  : `${ids.length}${slot.half ? "" : `/${req}`}`}
+              </span>
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1">
+              {ids.map((id) => {
+                const e = empById(id);
+                const guest = e && e.storeId !== storeId;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => removeFrom(selected, slot.key, id)}
+                    className="rounded-full px-3 py-2 text-xs font-medium active:opacity-60"
+                    style={{ background: guest ? GUEST : slot.color, color: PAPER }}
+                  >
+                    {e?.name}
+                    {guest && ` (${storeName(e.storeId).split(" ")[0]} 지원)`} ×
+                  </button>
+                );
+              })}
+              {!blocked && ids.length < cap && (
+                <button
+                  onClick={() => setPicker({ date: selected, slotKey: slot.key })}
+                  className="rounded-full px-3 py-2 text-xs active:opacity-60"
+                  style={{ border: `1px dashed ${RULE}`, color: MUTED }}
+                >
+                  + 넣기
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div
       className="min-h-screen w-full font-sans"
@@ -2277,147 +2751,30 @@ export default function ScheduleDemo() {
         </div>
       </header>
 
-      {/* 근무표 */}
+      {/* 근무표. PC(1024px 이상)에서는 캘린더+선택한 날짜 관리를 왼쪽에, 통계
+          막대그래프를 오른쪽에 2단으로 보여준다. 모바일에서는 지금처럼 위아래로 이어진다. */}
       {tab === "board" && (
-        <div className="px-4 pb-8">
-          {serverOk === false && (
-            <div
-              className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
-              style={{ background: ALERT, color: PAPER }}
-            >
-              계산 서버가 꺼져 있습니다. backend 폴더에서 uvicorn을 실행해 주세요.
-            </div>
-          )}
-
-          <div className="mt-3 flex gap-2">
-            <button
-              onClick={runAuto}
-              disabled={autoBusy}
-              className="flex-1 rounded-md py-3 text-sm font-semibold active:opacity-70"
-              style={{
-                background: INK,
-                color: PAPER,
-                opacity: autoBusy ? 0.7 : 1,
-                cursor: autoBusy ? "default" : "pointer",
-              }}
-            >
-              {autoBusy ? (
-                <span className="flex items-center justify-center gap-2">
+        <div
+          className={showDesktopBoard ? "grid gap-4 px-4 pb-8" : "px-4 pb-8"}
+          style={showDesktopBoard ? { gridTemplateColumns: "1fr 1fr", alignItems: "start" } : undefined}
+        >
+          <div style={showDesktopBoard ? { gridColumn: 1, minWidth: 0 } : undefined}>
+          {/* 자동 배정·경고 문구. PC에서는 접어두고 필요할 때 펼친다 */}
+          {showDesktopBoard ? (
+            <details className="mt-3 rounded-md" style={{ border: `1px solid ${RULE}`, background: CARD }}>
+              <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium" style={{ color: MUTED }}>
+                자동 배정 · 알림
+                {(peakShortDays.length > 0 || shortDays.length > 0) && (
                   <span
-                    className="h-3 w-3 animate-spin rounded-full"
-                    style={{ border: `2px solid ${PAPER}`, borderTopColor: "transparent" }}
+                    className="ml-2 inline-block h-[6px] w-[6px] rounded-full align-middle"
+                    style={{ background: ALERT }}
                   />
-                  계산 중…
-                </span>
-              ) : (
-                `이번 주 자동으로 짜기 (${storeName(storeId)})`
-              )}
-            </button>
-            {hasSchedule && (
-              <button
-                onClick={clearAll}
-                disabled={autoBusy}
-                className="rounded-md px-4 text-sm active:opacity-70"
-                style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
-              >
-                비우기
-              </button>
-            )}
-          </div>
-
-          {solveError && (
-            <div
-              className="mt-2 whitespace-pre-line rounded-md px-3 py-2 text-xs leading-relaxed"
-              style={{ background: "#F5EAD6", color: "#7A5A18" }}
-            >
-              {solveError}
-            </div>
-          )}
-
-          {diagnostics && solveMeta && (
-            <details className="mt-2 rounded-md px-3 py-2 text-xs" style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}>
-              <summary className="cursor-pointer font-medium" style={{ color: INK }}>
-                {solveMeta.status === "OPTIMAL" ? "최적해" : solveMeta.status === "TIMEOUT" ? "근사해" : solveMeta.status}
-                {" "}({Math.round(solveMeta.objective ?? 0)}점) · {solveMeta.wallTimeSec.toFixed(1)}초
+                )}
               </summary>
-              <div className="mt-1 leading-relaxed">
-                형평 {Math.round(diagnostics.penalties.fairness)} · 부족 {Math.round(diagnostics.penalties.gap)} ·
-                {" "}부족일수 {Math.round(diagnostics.penalties.gapDays)} · 바인원 {Math.round(diagnostics.penalties.floor)} ·
-                {" "}과잉 {Math.round(diagnostics.penalties.over)} · 최소근무 {Math.round(diagnostics.penalties.minWeek)} ·
-                {" "}초과근무 {Math.round(diagnostics.penalties.overtime)}
-              </div>
-              {solveMeta.warnings.length > 0 && (
-                <div className="mt-1 leading-relaxed" style={{ color: "#7A5A18" }}>
-                  {solveMeta.warnings.map((w, i) => (
-                    <div key={i}>· {w}</div>
-                  ))}
-                </div>
-              )}
+              <div className="px-3 pb-3">{boardBanners}</div>
             </details>
-          )}
-
-          {view === "week" && hasSchedule && (
-            <button
-              onClick={copyResultMarkdown}
-              className="mt-2 w-full rounded-md py-2 text-xs font-medium active:opacity-70"
-              style={{ border: `1px solid ${RULE}`, background: CARD, color: MUTED }}
-            >
-              {copyStatus === "copied"
-                ? "복사됨 ✓ — 붙여넣기 해서 공유하세요"
-                : copyStatus === "error"
-                ? "복사 실패 — 브라우저 권한을 확인해 주세요"
-                : "📋 이번 주 결과 마크다운으로 복사"}
-            </button>
-          )}
-
-          {peakShortDays.length > 0 && (
-            <div
-              className="mt-3 rounded-md px-3 py-2 text-xs font-semibold leading-relaxed"
-              style={{ background: ALERT, color: PAPER }}
-            >
-              금토일 {peakShortDays.length}일이 비었습니다. 이 날은 채워야 하니 직접 조정하세요.
-            </div>
-          )}
-
-          {floorRiskDays.length > 0 && (
-            <div
-              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
-              style={{ background: "#F5EAD6", color: "#7A5A18" }}
-            >
-              {floorRiskDays.length}일은 휴게와 빵 받는 시간이 겹쳐 바에 {FLOOR_MIN}명이 안 남습니다.
-            </div>
-          )}
-
-          {shortDays.length > 0 && (
-            <div
-              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
-              style={{ background: "#F7E6E1", color: ALERT }}
-            >
-              {view === "week" ? "이번 주" : "이번 달"} {shortDays.length}일에 빈 자리가 있고, 합쳐서{" "}
-              {totalShortHours}시간 부족합니다.
-            </div>
-          )}
-
-          {view === "week" && weekLockedDays.length > 0 && (
-            <div
-              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
-              style={{ background: "#EAE8E1", color: MUTED }}
-            >
-              🔒 {weekLockedDays.map((d) => Number(d.slice(8))).join(", ")}일은 잠겨 있어 "이번 주
-              자동으로 짜기"를 눌러도 그대로 유지됩니다. 빈 자리가 안 없어진다면 이 날짜를 먼저
-              풀어보세요.
-            </div>
-          )}
-
-          {firstDayBoundaryGap && (
-            <div
-              className="mt-2 rounded-md px-3 py-2 text-xs leading-relaxed"
-              style={{ background: "#EAE8E1", color: MUTED }}
-            >
-              {Number(scopeDates[0].slice(8))}일 새벽(00~08시) 부족은 그 전날 밤 근무자가 아직
-              배정 안 되어서 생기는 것으로 보입니다. 이 범위만 다시 돌려서는 안 없어지고, 그 전날(전주)을
-              먼저 배정해야 사라집니다.
-            </div>
+          ) : (
+            boardBanners
           )}
 
           {/* 주간 표 */}
@@ -2438,7 +2795,7 @@ export default function ScheduleDemo() {
                       return (
                         <button
                           key={d}
-                          onClick={() => setSelected(isSel ? null : d)}
+                          onClick={() => setSelected(d)}
                           className="relative rounded-t py-1 active:opacity-60"
                           style={{
                             background: isSel ? INK : short ? "#F7E6E1" : peak ? "#E4E1D8" : "transparent",
@@ -2509,7 +2866,7 @@ export default function ScheduleDemo() {
                           return (
                             <button
                               key={d}
-                              onClick={() => setSelected(selected === d ? null : d)}
+                              onClick={() => setSelected(d)}
                               className="flex h-8 items-center justify-center rounded active:opacity-60"
                               style={{
                                 background: slot ? slot.color : CARD,
@@ -2551,54 +2908,8 @@ export default function ScheduleDemo() {
                 ))}
               </div>
 
-              {/* 이번 주 요약 */}
-              <div
-                className="mt-4 rounded-lg p-3"
-                style={{ background: CARD, border: `1px solid ${RULE}` }}
-              >
-                <div className="font-mono text-[11px]" style={{ color: MUTED }}>
-                  이번 주 근무일수 (쩜오 0.5)
-                </div>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-                  {weekRows.map((e) => {
-                    const n = weekDaysOf(e.id);
-                    const local = storeDaysOf(e.id);
-                    const guest = e.storeId !== storeId;
-                    const cap = Math.min(e.maxPerWeek, WEEK_CAP);
-                    const over = n > WEEK_CAP; // 주 6일을 넘긴 경우
-                    const plus = !over && n > cap; // 본인 상한만 넘긴 경우
-                    const under = !guest && e.minPerWeek > 0 && n < e.minPerWeek;
-                    return (
-                      <span key={e.id} className="flex items-center gap-1">
-                        <span className="text-xs" style={{ color: guest ? GUEST : INK }}>
-                          {guest ? "지원" : e.name}
-                        </span>
-                        <span
-                          className="font-mono text-xs font-semibold"
-                          style={{ color: guest ? GUEST : over ? ALERT : plus || under ? TIGHT : INK }}
-                        >
-                          {guest ? `${local}일` : `${n}/${cap}`}
-                        </span>
-                        {over && (
-                          <span className="font-mono text-[9px]" style={{ color: ALERT }}>
-                            6일초과
-                          </span>
-                        )}
-                        {plus && (
-                          <span className="font-mono text-[9px]" style={{ color: TIGHT }}>
-                            추가
-                          </span>
-                        )}
-                        {under && (
-                          <span className="font-mono text-[9px]" style={{ color: TIGHT }}>
-                            미달
-                          </span>
-                        )}
-                      </span>
-                    );
-                  })}
-                </div>
-              </div>
+              {/* 이번 주 요약. PC 4분할에서는 오른쪽 칸으로 옮겨가므로 여기서는 숨긴다 */}
+              {!showDesktopBoard && weekStatsBlock}
             </>
           )}
 
@@ -2645,7 +2956,7 @@ export default function ScheduleDemo() {
                   return (
                     <button
                       key={date}
-                      onClick={() => setSelected(isSel ? null : date)}
+                      onClick={() => setSelected(date)}
                       className="relative flex h-16 flex-col items-center rounded-md pt-1 active:opacity-60"
                       style={{
                         background: peak ? "#EDEBE4" : CARD,
@@ -2700,252 +3011,36 @@ export default function ScheduleDemo() {
             </>
           )}
 
-          {/* 선택한 날짜 상세 */}
+          {/* 선택한 날짜 상세: 헤더 + 자리별 배정(직원 넣고빼기). PC에서는 차트·휴게순번이
+              오른쪽 통계 칸으로 옮겨가고 여기는 자리 배정만 남는다(요청: 자리 배정은
+              캘린더 아래, 차트·휴게순번은 오른쪽). */}
           {selected && (
             <div className="mt-4 rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-sm font-semibold">
-                    {selected.slice(5).replace("-", "/")} ({WD[wdIndex(parse(selected))]})
-                  </span>
-                  {isPeak(selected) && (
-                    <span
-                      className="rounded px-1 py-[1px] font-mono text-[10px]"
-                      style={{ background: INK, color: PAPER }}
-                    >
-                      금토일
-                    </span>
-                  )}
-                </div>
-                {locked[selected] && (
-                  <button
-                    onClick={() => unlock(selected)}
-                    className="rounded px-2 py-1 font-mono text-[11px] active:opacity-60"
-                    style={{ border: `1px solid ${RULE}`, color: MUTED }}
-                  >
-                    잠금 풀기
-                  </button>
-                )}
-              </div>
-
-              <div className="mt-3 rounded-md p-2" style={{ background: PAPER }}>
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px]" style={{ color: MUTED }}>
-                    배정 인원
-                  </span>
-                  <span
-                    className="font-mono text-[10px]"
-                    style={{ color: gapMinOf(selected) > 0 ? ALERT : MUTED }}
-                  >
-                    {gapMinOf(selected) > 0 ? `${gapMinOf(selected)}분 부족` : "빈 자리 없음"}
-                  </span>
-                </div>
-                <div className="mt-2">
-                  <AxisChart
-                    values={covOf(selected)}
-                    top={Math.max(3, ...covOf(selected), ...demandFor(selected))}
-                    colorAt={(n, i) =>
-                      gapOf(covOf(selected), selected)[i] > 0 ? ALERT : FILLED
-                    }
-                  />
-                </div>
-
-                <div className="mt-3 flex items-center justify-between">
-                  <span className="font-mono text-[10px]" style={{ color: MUTED }}>
-                    바 인원 (휴게·빵 제외)
-                  </span>
-                  <span
-                    className="font-mono text-[10px]"
-                    style={{
-                      color:
-                        floorMinOf(selected) < FLOOR_MIN
-                          ? ALERT
-                          : floorMinOf(selected) < FLOOR_OK
-                          ? TIGHT
-                          : MUTED,
-                    }}
-                  >
-                    17시 전 최소 {floorMinOf(selected)}명
-                  </span>
-                </div>
-                <div className="mt-2">
-                  <AxisChart
-                    values={floorOf(selected)}
-                    top={Math.max(4, ...floorOf(selected))}
-                    guide={FLOOR_MIN}
-                    colorAt={(n, i) =>
-                      i < FLOOR_FROM || i >= FLOOR_UNTIL
-                        ? EMPTY
-                        : n < FLOOR_MIN
-                        ? ALERT
-                        : FILLED
-                    }
-                  />
-                </div>
-
-                <div className="mt-3 font-mono text-[10px]" style={{ color: MUTED }}>
-                  휴게인원 (휴게+빵으로 자리 비운 인원)
-                </div>
-                <div className="mt-2">
-                  <AxisChart
-                    values={restOf(selected)}
-                    top={Math.max(2, ...restOf(selected))}
-                    colorAt={() => GUEST}
-                  />
-                </div>
-
-                <div className="mt-3 font-mono" style={{ fontSize: 10, color: MUTED }}>
-                  휴게와 빵
-                </div>
-                <div className="mt-1">
-                  <BreakTimeline date={selected} />
-                  <Ticks />
-                </div>
-              </div>
-
-              {breaksOf(selected).length > 0 && (
-                <div className="mt-3 rounded-md p-2" style={{ background: PAPER }}>
-                  <div className="font-mono text-[10px]" style={{ color: MUTED }}>
-                    휴게 순번
-                  </div>
-                  <div className="mt-2 flex flex-col gap-1">
-                    {breaksOf(selected).map((b, i) => (
-                      <div key={i} className="flex items-center gap-2">
-                        <span
-                          className="h-2 w-2 rounded-full"
-                          style={{ background: slotInfo(b.slotKey).color }}
-                        />
-                        <span className="text-xs">{empById(b.empId)?.name}</span>
-                        <span className="font-mono text-[10px]" style={{ color: MUTED }}>
-                          {slotInfo(b.slotKey).label}
-                        </span>
-                        <span className="ml-auto font-mono text-[11px]">
-                          {bucketLabel(b.from)}~{bucketLabel(b.to)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-3 flex flex-col gap-2">
-                {ALL_SLOTS.map((slot) => {
-                  const ids = dayOf(selected)[slot.key] || [];
-                  const req = slot.half ? 0 : needOf(slot, selected);
-                  const lack = !slot.half && ids.length < req;
-                  const cap = slot.half ? 99 : req + slot.extra;
-                  const blocked = startTaken(dayOf(selected), slot);
-
-                  return (
-                    <div
-                      key={slot.key}
-                      className="rounded-md p-2"
-                      style={{
-                        border: lack && !blocked ? `1px dashed ${ALERT}` : `1px solid ${RULE}`,
-                        background: PAPER,
-                        opacity: blocked && ids.length === 0 ? 0.45 : 1,
-                      }}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className="rounded px-1 font-mono text-[9px] font-semibold"
-                          style={{ background: slot.color, color: PAPER }}
-                        >
-                          {slot.short}
-                        </span>
-                        <span className="text-xs font-semibold">{slot.label}</span>
-                        <span className="font-mono text-[10px]" style={{ color: MUTED }}>
-                          {timeText(slot)}
-                        </span>
-                        <span
-                          className="ml-auto font-mono text-[10px]"
-                          style={{ color: lack && !blocked ? ALERT : MUTED }}
-                        >
-                          {blocked && ids.length === 0
-                            ? "같은 시각 사용중"
-                            : `${ids.length}${slot.half ? "" : `/${req}`}`}
-                        </span>
-                      </div>
-
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {ids.map((id) => {
-                          const e = empById(id);
-                          const guest = e && e.storeId !== storeId;
-                          return (
-                            <button
-                              key={id}
-                              onClick={() => removeFrom(selected, slot.key, id)}
-                              className="rounded-full px-3 py-2 text-xs font-medium active:opacity-60"
-                              style={{ background: guest ? GUEST : slot.color, color: PAPER }}
-                            >
-                              {e?.name}
-                              {guest && ` (${storeName(e.storeId).split(" ")[0]} 지원)`} ×
-                            </button>
-                          );
-                        })}
-                        {!blocked && ids.length < cap && (
-                          <button
-                            onClick={() => setPicker({ date: selected, slotKey: slot.key })}
-                            className="rounded-full px-3 py-2 text-xs active:opacity-60"
-                            style={{ border: `1px dashed ${RULE}`, color: MUTED }}
-                          >
-                            + 넣기
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              {selectedHeader}
+              {!showDesktopBoard && <div className="mt-3">{selectedCharts}</div>}
+              {!showDesktopBoard && selectedBreakOrder && <div className="mt-3">{selectedBreakOrder}</div>}
+              <div className="mt-3">{selectedSlots}</div>
             </div>
           )}
 
-          {/* 월 근무 요약 */}
-          {view === "month" && hasSchedule && (
-            <div className="mt-4 rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
-              <div className="font-mono text-[11px]" style={{ color: MUTED }}>
-                이번 달 근무일수 (쩜오 0.5, 전 매장 합산)
-              </div>
-              <div className="mt-2 flex flex-col gap-2">
-                {orderedStaffForBoard.map((e) => {
-                  const st = stats[e.id] || { days: 0, half: 0, guest: 0 };
-                  const top = Math.max(1, ...orderedStaffForBoard.map((s) => stats[s.id]?.days || 0));
-                  return (
-                    <div key={e.id} className="flex items-center gap-2">
-                      <span className="w-16 shrink-0 truncate text-xs">
-                        {e.name}
-                        {e.kind === "night" && (
-                          <span className="ml-1 font-mono text-[9px]" style={{ color: MUTED }}>
-                            야
-                          </span>
-                        )}
-                      </span>
-                      <span className="h-2 flex-1 rounded-full" style={{ background: PAPER }}>
-                        <span
-                          className="block h-2 rounded-full"
-                          style={{
-                            width: `${(st.days / top) * 100}%`,
-                            background: e.kind === "night" ? INK : FILLED,
-                          }}
-                        />
-                      </span>
-                      <span className="w-8 text-right font-mono text-xs">{st.days}</span>
-                      {st.guest > 0 ? (
-                        <span className="w-12 text-right font-mono text-[10px]" style={{ color: GUEST }}>
-                          지원{st.guest}
-                        </span>
-                      ) : (
-                        <span
-                          className="w-12 text-right font-mono text-[10px]"
-                          style={{ color: st.half > e.maxHalf ? ALERT : MUTED }}
-                        >
-                          쩜{st.half}/{e.maxHalf}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+          {/* 월 근무 요약. PC 4분할에서는 오른쪽 칸으로 옮겨가므로 여기서는 숨긴다 */}
+          {!showDesktopBoard && monthStatsBlock}
+          </div>
+
+          {/* 통계 막대그래프 (PC 전용, 오른쪽 칸): 주/월 요약 + 선택한 날짜의 차트·휴게순번 */}
+          {showDesktopBoard && (
+            <div style={{ gridColumn: 2, minWidth: 0 }}>
+              {view === "week" && weekStatsBlock}
+              {monthStatsBlock}
+              {selected && (selectedCharts || selectedBreakOrder) && (
+                <div className="mt-4 rounded-lg p-3" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+                  <div className="font-mono text-xs" style={{ color: MUTED }}>
+                    {selected.slice(5).replace("-", "/")} ({WD[wdIndex(parse(selected))]})
+                  </div>
+                  <div className="mt-3">{selectedCharts}</div>
+                  {selectedBreakOrder && <div className="mt-3">{selectedBreakOrder}</div>}
+                </div>
+              )}
             </div>
           )}
         </div>
